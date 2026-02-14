@@ -1,6 +1,6 @@
 [package]
 name = "spocket"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
@@ -12,3 +12,4 @@ hex = "0.4"
 dirs = "5.0"
 colored = "2.1"
 anyhow = "1.0"
+shellexpand = "3.1"

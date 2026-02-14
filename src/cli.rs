@@ -22,6 +22,10 @@ pub struct Cli {
     /// Include Beads setup (placeholder)
     #[arg(long = "with-beads")]
     pub with_beads: bool,
+
+    /// Skip creating README files in empty directories
+    #[arg(long = "no-readme")]
+    pub no_readme: bool,
 }
 
 #[derive(Subcommand, Debug)]

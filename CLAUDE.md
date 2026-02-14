@@ -1,5 +1,14 @@
 # Claude instructions — safe_pocket
 
+## Project Overview
+- **Safe Pocket (spocket)**: Rust CLI tool for managing ad hoc VS Code workspaces
+- **Key Directories**:
+  - `/Users/jadennation/DEV/bin/safe_pocket/src/` - Rust source code
+  - `/Users/jadennation/DEV/bin/safe_pocket/FEATURES/` - Feature specifications
+  - `/Users/jadennation/.spocket/` - Safe pocket workspaces (user data)
+  - `/Users/jadennation/.config/spocket/` - Configuration files
+- **Build**: `cargo build --release` → binary at `/Users/jadennation/DEV/bin/safe_pocket/target/release/spocket`
+
 Purpose
 - Define strict rules for any Claude-generated or Claude-assisted code/edits in this repository.
 
