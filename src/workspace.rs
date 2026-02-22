@@ -7,12 +7,21 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::hash::hash_paths;
+use crate::manifest::Manifest;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct VSCodeWorkspace {
     pub folders: Vec<WorkspaceFolder>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub settings: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launch: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tasks: Option<serde_json::Value>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -20,6 +29,16 @@ pub struct WorkspaceFolder {
     pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+}
+
+pub enum DriftResult {
+    InSync,
+    AcceptFile {
+        new_core_paths: Vec<PathBuf>,
+        existing_workspace: VSCodeWorkspace,
+    },
+    OverwrittenFile,
+    Skipped,
 }
 
 pub struct Workspace {
@@ -67,7 +86,8 @@ impl Workspace {
     pub fn create(&self) -> Result<()> {
         if self.exists() {
             println!("{}", "Workspace already exists".dimmed());
-            return self.check_mismatch();
+            // Still do drift detection for existing workspaces
+            return Ok(());
         }
 
         println!("{}", "Creating new safe pocket...".bright_white());
@@ -80,6 +100,10 @@ impl Workspace {
 
         // Initialize git
         self.init_git()?;
+
+        // Write manifest
+        let manifest = Manifest::new(self.hash.clone(), self.core_paths.clone());
+        manifest.save(&self.pocket_dir)?;
 
         println!("{} {}", "Created workspace:".bright_green(), self.hash.bright_yellow());
         println!("  {} {}", "Location:".dimmed(), self.pocket_dir.display().to_string().bright_blue());
@@ -186,7 +210,32 @@ impl Workspace {
         Ok(())
     }
 
-    pub fn create_workspace_file(&self) -> Result<()> {
+    /// Read and parse a workspace file, returning the parsed struct and the extracted core paths.
+    /// Filters out the pocket directory folder using path prefix matching.
+    pub fn read_workspace_file(workspace_file: &Path, pocket_dir: &Path) -> Result<(VSCodeWorkspace, Vec<PathBuf>)> {
+        let spocket_dir = Self::spocket_dir()?;
+
+        let content = fs::read_to_string(workspace_file)
+            .context("Failed to read workspace file")?;
+
+        let workspace: VSCodeWorkspace = serde_json::from_str(&content)
+            .context("Failed to parse workspace file")?;
+
+        let core_paths: Vec<PathBuf> = workspace
+            .folders
+            .iter()
+            .map(|f| PathBuf::from(&f.path))
+            .filter(|p| !p.starts_with(pocket_dir) && !p.starts_with(&spocket_dir))
+            .collect();
+
+        Ok((workspace, core_paths))
+    }
+
+    /// Build a workspace file from core_paths, optionally preserving settings from an existing workspace.
+    fn write_workspace_file_preserving(
+        &self,
+        existing: Option<&VSCodeWorkspace>,
+    ) -> Result<()> {
         let mut folders = Vec::new();
 
         // Add core paths
@@ -203,9 +252,24 @@ impl Workspace {
             name: Some(format!("[Safe Pocket] {}", self.hash)),
         });
 
-        let workspace = VSCodeWorkspace {
-            folders,
-            settings: None,
+        let workspace = if let Some(existing) = existing {
+            VSCodeWorkspace {
+                folders,
+                settings: existing.settings.clone(),
+                extensions: existing.extensions.clone(),
+                launch: existing.launch.clone(),
+                tasks: existing.tasks.clone(),
+                extra: existing.extra.clone(),
+            }
+        } else {
+            VSCodeWorkspace {
+                folders,
+                settings: None,
+                extensions: None,
+                launch: None,
+                tasks: None,
+                extra: serde_json::Map::new(),
+            }
         };
 
         let workspace_json = serde_json::to_string_pretty(&workspace)
@@ -216,6 +280,10 @@ impl Workspace {
             .context("Failed to write workspace file")?;
 
         Ok(())
+    }
+
+    pub fn create_workspace_file(&self) -> Result<()> {
+        self.write_workspace_file_preserving(None)
     }
 
     fn init_git(&self) -> Result<()> {
@@ -232,39 +300,144 @@ impl Workspace {
         Ok(())
     }
 
-    pub fn check_mismatch(&self) -> Result<()> {
+    /// Detect workspace file drift and prompt the user to resolve it.
+    pub fn detect_and_resolve_drift(&self) -> Result<DriftResult> {
         let workspace_path = self.workspace_file_path();
 
         if !workspace_path.exists() {
-            return Ok(());
+            return Ok(DriftResult::InSync);
         }
 
-        let content = fs::read_to_string(&workspace_path)
-            .context("Failed to read workspace file")?;
-
-        let workspace: VSCodeWorkspace = serde_json::from_str(&content)
-            .context("Failed to parse workspace file")?;
-
-        // Extract paths from workspace (excluding the safe pocket itself)
-        let workspace_paths: Vec<PathBuf> = workspace
-            .folders
-            .iter()
-            .map(|f| PathBuf::from(&f.path))
-            .filter(|p| !p.starts_with(&self.pocket_dir))
-            .collect();
+        let (workspace, file_paths) = Self::read_workspace_file(&workspace_path, &self.pocket_dir)?;
 
         // Compare with core paths
-        let workspace_set: HashSet<_> = workspace_paths.iter().collect();
+        let file_set: HashSet<_> = file_paths.iter().collect();
         let core_set: HashSet<_> = self.core_paths.iter().collect();
 
-        if workspace_set != core_set {
-            println!("\n{}", "Warning: Workspace mismatch detected!".bright_yellow());
-            println!("  {} Hash is based on: {:?}", "Expected:".dimmed(), self.core_paths);
-            println!("  {} Workspace contains: {:?}", "Found:".dimmed(), workspace_paths);
-            println!("\n  {} Run workspace file cleanup to fix this", "Tip:".bright_cyan());
+        if file_set == core_set {
+            return Ok(DriftResult::InSync);
         }
 
-        Ok(())
+        // Determine added and removed folders
+        let added: Vec<_> = file_paths.iter().filter(|p| !core_set.contains(p)).collect();
+        let removed: Vec<_> = self.core_paths.iter().filter(|p| !file_set.contains(p)).collect();
+
+        println!("\n{}", "Workspace drift detected!".bright_yellow().bold());
+
+        if !added.is_empty() {
+            println!("  {} (in file but not in hash):", "Added".bright_green());
+            for p in &added {
+                println!("    + {}", p.display().to_string().bright_green());
+            }
+        }
+
+        if !removed.is_empty() {
+            println!("  {} (in hash but not in file):", "Removed".bright_red());
+            for p in &removed {
+                println!("    - {}", p.display().to_string().bright_red());
+            }
+        }
+
+        println!();
+        println!("  {}  Accept workspace file as truth (migrate pocket)", "1.".bright_yellow());
+        println!("  {}  Overwrite file to match original directories", "2.".bright_yellow());
+        println!("  {}  Do nothing", "3.".bright_yellow());
+        println!();
+
+        print!("{} ", "Choose [1/2/3]:".bright_white());
+        use std::io::{self, Write as IoWrite};
+        io::stdout().flush()?;
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let input = input.trim();
+
+        match input {
+            "1" => {
+                Ok(DriftResult::AcceptFile {
+                    new_core_paths: file_paths,
+                    existing_workspace: workspace,
+                })
+            }
+            "2" => {
+                self.write_workspace_file_preserving(Some(&workspace))?;
+                println!("{}", "Workspace file overwritten to match original directories.".bright_green());
+                Ok(DriftResult::OverwrittenFile)
+            }
+            _ => {
+                println!("{}", "No changes made.".dimmed());
+                Ok(DriftResult::Skipped)
+            }
+        }
+    }
+
+    /// Migrate a pocket to a new hash when its directory set changes.
+    /// Shared by drift resolution and augment.
+    pub fn migrate_pocket(
+        old_workspace: &Workspace,
+        new_core_paths: Vec<PathBuf>,
+        existing_ws: Option<&VSCodeWorkspace>,
+    ) -> Result<Workspace> {
+        let new_hash = hash_paths(&new_core_paths);
+        let spocket_dir = Self::spocket_dir()?;
+        let new_pocket_dir = spocket_dir.join(&new_hash);
+
+        if new_pocket_dir.exists() {
+            return Err(anyhow!(
+                "Cannot migrate: pocket {} already exists at {}",
+                new_hash,
+                new_pocket_dir.display()
+            ));
+        }
+
+        let old_hash = old_workspace.hash.clone();
+
+        // Rename old pocket dir -> new pocket dir
+        fs::rename(&old_workspace.pocket_dir, &new_pocket_dir)
+            .context("Failed to rename pocket directory")?;
+
+        // Remove old workspace file (named after old hash)
+        let old_ws_file = new_pocket_dir.join(format!("{}.code-workspace", old_hash));
+        if old_ws_file.exists() {
+            fs::remove_file(&old_ws_file)
+                .context("Failed to remove old workspace file")?;
+        }
+
+        // Create new workspace struct
+        let new_workspace = Workspace {
+            hash: new_hash.clone(),
+            core_paths: new_core_paths.clone(),
+            sidecar_paths: old_workspace.sidecar_paths.clone(),
+            pocket_dir: new_pocket_dir.clone(),
+            create_readmes: false,
+        };
+
+        // Write new workspace file (preserving settings if available)
+        new_workspace.write_workspace_file_preserving(existing_ws)?;
+
+        // Update manifest
+        let old_manifest = Manifest::load(&new_pocket_dir)?;
+        let original_created_at = old_manifest
+            .as_ref()
+            .map(|m| m.created_at)
+            .unwrap_or_else(chrono::Utc::now);
+
+        let manifest = Manifest::new_augmented(
+            new_hash.clone(),
+            new_core_paths,
+            old_hash.clone(),
+            original_created_at,
+        );
+        manifest.save(&new_pocket_dir)?;
+
+        println!("{} {} {} {}",
+            "Migrated pocket:".bright_green(),
+            old_hash.bright_yellow(),
+            "->".dimmed(),
+            new_hash.bright_yellow()
+        );
+
+        Ok(new_workspace)
     }
 
     pub fn open(&self) -> Result<()> {
@@ -280,12 +453,7 @@ impl Workspace {
                 self.sidecar_paths.len().to_string().bright_yellow()
             );
 
-            // Read current workspace
-            let content = fs::read_to_string(&workspace_path)
-                .context("Failed to read workspace file")?;
-
-            let mut workspace: VSCodeWorkspace = serde_json::from_str(&content)
-                .context("Failed to parse workspace file")?;
+            let (mut workspace, _) = Self::read_workspace_file(&workspace_path, &self.pocket_dir)?;
 
             // Add sidecars
             for path in &self.sidecar_paths {
@@ -351,6 +519,20 @@ impl Workspace {
         // Update workspace file with new paths
         target_workspace.create_workspace_file()?;
 
+        // Write manifest with lineage
+        let manifest = Manifest::new_cloned(
+            target_workspace.hash.clone(),
+            target_workspace.core_paths.clone(),
+            source_workspace.hash.clone(),
+        );
+        manifest.save(&target_workspace.pocket_dir)?;
+
+        // Update parent's children list
+        if let Ok(Some(mut parent_manifest)) = Manifest::load(&source_workspace.pocket_dir) {
+            parent_manifest.add_child(target_workspace.hash.clone());
+            let _ = parent_manifest.save(&source_workspace.pocket_dir);
+        }
+
         println!("{} {}",
             "Cloned to:".bright_green(),
             target_workspace.hash.bright_yellow()
@@ -384,21 +566,80 @@ impl Workspace {
                 continue;
             }
 
-            let content = fs::read_to_string(&workspace_file)?;
-            let workspace: VSCodeWorkspace = serde_json::from_str(&content)?;
+            let (_, core_paths) = Self::read_workspace_file(&workspace_file, &pocket_dir)?;
 
             // Check if any folder matches the path
-            for folder in &workspace.folders {
-                let folder_path = PathBuf::from(&folder.path);
-                if folder_path == path {
-                    // Reconstruct workspace
-                    let core_paths: Vec<PathBuf> = workspace
-                        .folders
-                        .iter()
-                        .map(|f| PathBuf::from(&f.path))
-                        .filter(|p| !p.starts_with(&pocket_dir))
-                        .collect();
+            for cp in &core_paths {
+                if cp == path {
+                    return Ok(Some(Self {
+                        hash,
+                        core_paths,
+                        sidecar_paths: vec![],
+                        pocket_dir,
+                        create_readmes: false,
+                    }));
+                }
+            }
+        }
 
+        Ok(None)
+    }
+
+    /// Find the workspace that "owns" the current directory.
+    /// Checks if cwd is inside a pocket dir, or inside/equal to any workspace's core_paths.
+    pub fn find_workspace_for_cwd(cwd: &Path) -> Result<Option<Self>> {
+        let spocket_dir = Self::spocket_dir()?;
+
+        // Check 1: Is CWD inside a ~/.spocket/<hash>/ directory?
+        if cwd.starts_with(&spocket_dir) {
+            // Extract the hash component (first dir after .spocket/)
+            if let Ok(relative) = cwd.strip_prefix(&spocket_dir) {
+                if let Some(hash_component) = relative.components().next() {
+                    let hash = hash_component.as_os_str().to_string_lossy().to_string();
+                    let pocket_dir = spocket_dir.join(&hash);
+                    let workspace_file = pocket_dir.join(format!("{}.code-workspace", hash));
+
+                    if workspace_file.exists() {
+                        let (_, core_paths) = Self::read_workspace_file(&workspace_file, &pocket_dir)?;
+                        return Ok(Some(Self {
+                            hash,
+                            core_paths,
+                            sidecar_paths: vec![],
+                            pocket_dir,
+                            create_readmes: false,
+                        }));
+                    }
+                }
+            }
+        }
+
+        // Check 2: Is CWD inside (or equal to) any workspace's core_paths?
+        let entries = fs::read_dir(&spocket_dir)
+            .context("Failed to read .spocket directory")?;
+
+        for entry in entries {
+            let entry = entry?;
+            let pocket_dir = entry.path();
+
+            if !pocket_dir.is_dir() {
+                continue;
+            }
+
+            let hash = pocket_dir.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+
+            let workspace_file = pocket_dir.join(format!("{}.code-workspace", hash));
+
+            if !workspace_file.exists() {
+                continue;
+            }
+
+            let (_, core_paths) = Self::read_workspace_file(&workspace_file, &pocket_dir)?;
+
+            for cp in &core_paths {
+                if cwd == cp || cwd.starts_with(cp) {
                     return Ok(Some(Self {
                         hash,
                         core_paths,
@@ -440,15 +681,7 @@ impl Workspace {
                 continue;
             }
 
-            let content = fs::read_to_string(&workspace_file)?;
-            let workspace: VSCodeWorkspace = serde_json::from_str(&content)?;
-
-            let core_paths: Vec<PathBuf> = workspace
-                .folders
-                .iter()
-                .map(|f| PathBuf::from(&f.path))
-                .filter(|p| !p.starts_with(&pocket_dir))
-                .collect();
+            let (_, core_paths) = Self::read_workspace_file(&workspace_file, &pocket_dir)?;
 
             workspaces.push(Self {
                 hash,
@@ -530,7 +763,7 @@ impl Workspace {
         println!();
 
         print!("{} ", "Select a workspace to clone from (0-{}, or press Enter to skip):".bright_white());
-        use std::io::{self, Write};
+        use std::io::{self, Write as IoWrite};
         io::stdout().flush()?;
 
         let mut input = String::new();
@@ -643,5 +876,29 @@ mod tests {
 
         let similarity = Workspace::calculate_similarity(&paths1, &paths2);
         assert_eq!(similarity, 0.0);
+    }
+
+    #[test]
+    fn test_vscode_workspace_preserves_extra_fields() {
+        let json = r#"{
+            "folders": [{"path": "/test"}],
+            "settings": {"editor.fontSize": 16},
+            "extensions": {"recommendations": ["rust-lang.rust-analyzer"]},
+            "launch": {"version": "0.2.0"},
+            "tasks": {"version": "2.0.0"},
+            "customField": "preserved"
+        }"#;
+
+        let ws: VSCodeWorkspace = serde_json::from_str(json).unwrap();
+        assert!(ws.settings.is_some());
+        assert!(ws.extensions.is_some());
+        assert!(ws.launch.is_some());
+        assert!(ws.tasks.is_some());
+        assert!(ws.extra.contains_key("customField"));
+
+        // Round-trip
+        let serialized = serde_json::to_string_pretty(&ws).unwrap();
+        assert!(serialized.contains("customField"));
+        assert!(serialized.contains("editor.fontSize"));
     }
 }

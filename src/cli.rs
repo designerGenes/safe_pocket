@@ -53,4 +53,20 @@ pub enum Commands {
     /// List all workspaces
     #[command(name = "list-workspaces")]
     ListWorkspaces,
+
+    /// Add or remove directories from the current workspace
+    #[command(name = "augment")]
+    Augment {
+        /// Directory paths to add to the workspace
+        #[arg(long = "add", value_name = "PATH")]
+        add: Vec<String>,
+
+        /// Directory paths to remove from the workspace
+        #[arg(long = "remove", value_name = "PATH")]
+        remove: Vec<String>,
+
+        /// Don't open VS Code after augmenting
+        #[arg(long = "no-open")]
+        no_open: bool,
+    },
 }

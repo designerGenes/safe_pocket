@@ -1,16 +1,19 @@
 mod cli;
 mod config;
 mod hash;
+mod manifest;
 mod workspace;
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use colored::Colorize;
 use std::fs;
+use std::path::PathBuf;
 
 use cli::{Cli, Commands};
 use config::Config;
-use workspace::Workspace;
+use manifest::Manifest;
+use workspace::{DriftResult, Workspace};
 
 fn main() {
     if let Err(e) = run() {
@@ -129,6 +132,10 @@ fn handle_command(command: Commands) -> Result<()> {
 
             Ok(())
         }
+
+        Commands::Augment { add, remove, no_open } => {
+            handle_augment(add, remove, no_open)
+        }
     }
 }
 
@@ -190,12 +197,25 @@ fn handle_workspace(cli: Cli) -> Result<()> {
                         .context("Failed to remove existing target pocket")?;
                 }
 
-                // Use the internal copy function (need to make it public or call differently)
                 copy_dir_all(&selected.pocket_dir, &workspace.pocket_dir)
                     .context("Failed to copy safe pocket contents")?;
 
                 // Create workspace file with new paths
                 workspace.create_workspace_file()?;
+
+                // Write manifest with lineage
+                let manifest = Manifest::new_cloned(
+                    workspace.hash.clone(),
+                    workspace.core_paths.clone(),
+                    selected.hash.clone(),
+                );
+                manifest.save(&workspace.pocket_dir)?;
+
+                // Update parent's children list
+                if let Ok(Some(mut parent_manifest)) = Manifest::load(&selected.pocket_dir) {
+                    parent_manifest.add_child(workspace.hash.clone());
+                    let _ = parent_manifest.save(&selected.pocket_dir);
+                }
 
                 println!("{} {}",
                     "Cloned to:".bright_green(),
@@ -209,12 +229,132 @@ fn handle_workspace(cli: Cli) -> Result<()> {
             // No similar workspaces found
             workspace.create()?;
         }
+
+        workspace.open()?;
     } else {
         println!("{}", "Using existing workspace".dimmed());
-        workspace.check_mismatch()?;
+
+        // Drift detection
+        let drift_result = workspace.detect_and_resolve_drift()?;
+
+        match drift_result {
+            DriftResult::AcceptFile { new_core_paths, existing_workspace } => {
+                let migrated = Workspace::migrate_pocket(
+                    &workspace,
+                    new_core_paths,
+                    Some(&existing_workspace),
+                )?;
+                migrated.open()?;
+            }
+            _ => {
+                workspace.open()?;
+            }
+        }
     }
 
-    workspace.open()?;
+    Ok(())
+}
+
+fn handle_augment(add: Vec<String>, remove: Vec<String>, no_open: bool) -> Result<()> {
+    if add.is_empty() && remove.is_empty() {
+        return Err(anyhow!("Nothing to do. Use --add or --remove to modify the workspace."));
+    }
+
+    let config = Config::load()?;
+    let cwd = std::env::current_dir()
+        .context("Failed to get current working directory")?;
+
+    let workspace = Workspace::find_workspace_for_cwd(&cwd)?
+        .ok_or_else(|| anyhow!(
+            "No workspace found for current directory: {}\nRun this from inside a workspace directory or a pocket directory.",
+            cwd.display()
+        ))?;
+
+    println!("{} {}",
+        "Found workspace:".bright_white(),
+        workspace.hash.bright_yellow()
+    );
+
+    // Build new core_paths
+    let mut new_paths: Vec<PathBuf> = workspace.core_paths.clone();
+
+    // Process additions
+    for path_str in &add {
+        let resolved = config.resolve_path(path_str)?;
+
+        if !resolved.exists() {
+            return Err(anyhow!("Path does not exist: {}", resolved.display()));
+        }
+
+        if new_paths.contains(&resolved) {
+            println!("  {} {} (already in workspace)",
+                "Skipped:".dimmed(),
+                resolved.display().to_string().bright_blue()
+            );
+        } else {
+            println!("  {} {}",
+                "Adding:".bright_green(),
+                resolved.display().to_string().bright_blue()
+            );
+            new_paths.push(resolved);
+        }
+    }
+
+    // Process removals
+    for path_str in &remove {
+        let resolved = config.resolve_path(path_str)?;
+        let before_len = new_paths.len();
+        new_paths.retain(|p| p != &resolved);
+
+        if new_paths.len() < before_len {
+            println!("  {} {}",
+                "Removing:".bright_red(),
+                resolved.display().to_string().bright_blue()
+            );
+        } else {
+            println!("  {} {} (not in workspace)",
+                "Skipped:".dimmed(),
+                resolved.display().to_string().bright_blue()
+            );
+        }
+    }
+
+    // Validate
+    if new_paths.is_empty() {
+        return Err(anyhow!("Cannot remove all directories. At least one directory must remain."));
+    }
+
+    // Check if anything actually changed
+    let new_paths_set: std::collections::HashSet<_> = new_paths.iter().collect();
+    let old_paths_set: std::collections::HashSet<_> = workspace.core_paths.iter().collect();
+
+    if new_paths_set == old_paths_set {
+        println!("{}", "No changes to apply.".dimmed());
+        return Ok(());
+    }
+
+    // Read existing workspace file for settings preservation
+    let workspace_file = workspace.workspace_file_path();
+    let existing_ws = if workspace_file.exists() {
+        let (ws, _) = Workspace::read_workspace_file(&workspace_file, &workspace.pocket_dir)?;
+        Some(ws)
+    } else {
+        None
+    };
+
+    // Migrate
+    let migrated = Workspace::migrate_pocket(
+        &workspace,
+        new_paths,
+        existing_ws.as_ref(),
+    )?;
+
+    if !no_open {
+        migrated.open()?;
+    } else {
+        println!("{} {}", "New workspace:".bright_green(), migrated.hash.bright_yellow());
+        println!("  {} {}", "Location:".dimmed(), migrated.pocket_dir.display().to_string().bright_blue());
+    }
 
     Ok(())
 }
