@@ -133,6 +133,10 @@ fn handle_command(command: Commands) -> Result<()> {
             Ok(())
         }
 
+        Commands::Sync { pocket } => {
+            handle_sync(pocket)
+        }
+
         Commands::Augment { add, remove, no_open } => {
             handle_augment(add, remove, no_open)
         }
@@ -181,6 +185,17 @@ fn handle_workspace(cli: Cli) -> Result<()> {
     let workspace = Workspace::new(core_paths.clone(), sidecar_paths, create_readmes)?;
 
     if !workspace.exists() {
+        // Secondary lookup: check if any existing pocket's manifest matches these paths
+        // (handles pockets that evolved in-place via sync/augment)
+        if let Some(existing) = Workspace::find_workspace_by_manifest_paths(&core_paths)? {
+            println!("{} {} (matched by manifest)",
+                "Found existing pocket:".bright_green(),
+                existing.hash.bright_yellow()
+            );
+            existing.open()?;
+            return Ok(());
+        }
+
         // Check for similar workspaces (smart cloning)
         let similar_workspaces = Workspace::find_similar_workspaces(&core_paths, 0.3)?;
 
@@ -238,13 +253,19 @@ fn handle_workspace(cli: Cli) -> Result<()> {
         let drift_result = workspace.detect_and_resolve_drift()?;
 
         match drift_result {
-            DriftResult::AcceptFile { new_core_paths, existing_workspace } => {
-                let migrated = Workspace::migrate_pocket(
-                    &workspace,
-                    new_core_paths,
-                    Some(&existing_workspace),
-                )?;
-                migrated.open()?;
+            DriftResult::AcceptFile { new_core_paths } => {
+                // In-place update: just update the manifest. The workspace file
+                // already has the new paths (the user edited it). The pocket dir stays put.
+                let mut manifest = match Manifest::load(&workspace.pocket_dir)? {
+                    Some(m) => m,
+                    None => Manifest::new(workspace.hash.clone(), workspace.core_paths.clone()),
+                };
+                manifest.update_paths(new_core_paths, &workspace.pocket_dir)?;
+                println!("{} {}",
+                    "Manifest updated in place:".bright_green(),
+                    manifest.hash.bright_yellow()
+                );
+                workspace.open()?;
             }
             _ => {
                 workspace.open()?;
@@ -252,6 +273,77 @@ fn handle_workspace(cli: Cli) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn handle_sync(pocket: String) -> Result<()> {
+    let pocket_dir = PathBuf::from(&pocket);
+
+    if !pocket_dir.is_dir() {
+        let out = serde_json::json!({
+            "status": "error",
+            "message": format!("Pocket directory does not exist: {}", pocket)
+        });
+        println!("{}", serde_json::to_string(&out)?);
+        return Ok(());
+    }
+
+    // Find the workspace file
+    let workspace_file = match Workspace::find_workspace_file(&pocket_dir) {
+        Some(f) => f,
+        None => {
+            let out = serde_json::json!({
+                "status": "error",
+                "message": "No workspace file found in pocket directory"
+            });
+            println!("{}", serde_json::to_string(&out)?);
+            return Ok(());
+        }
+    };
+
+    // Read current paths from workspace file
+    let (_, file_paths) = Workspace::read_workspace_file(&workspace_file, &pocket_dir)?;
+
+    // Load or backfill manifest
+    let (mut manifest, manifest_paths) = match Workspace::load_manifest_or_backfill(&pocket_dir)? {
+        Some(result) => result,
+        None => {
+            let out = serde_json::json!({
+                "status": "error",
+                "message": "Failed to load or create manifest"
+            });
+            println!("{}", serde_json::to_string(&out)?);
+            return Ok(());
+        }
+    };
+
+    // Compare
+    let file_set: std::collections::HashSet<_> = file_paths.iter().collect();
+    let manifest_set: std::collections::HashSet<_> = manifest_paths.iter().collect();
+
+    if file_set == manifest_set {
+        let out = serde_json::json!({
+            "status": "unchanged",
+            "hash": manifest.hash,
+            "birth_hash": manifest.birth_hash(),
+            "paths": manifest.core_paths,
+        });
+        println!("{}", serde_json::to_string(&out)?);
+        return Ok(());
+    }
+
+    // Paths differ — update manifest in place
+    let old_hash = manifest.hash.clone();
+    manifest.update_paths(file_paths, &pocket_dir)?;
+
+    let out = serde_json::json!({
+        "status": "synced",
+        "old_hash": old_hash,
+        "new_hash": manifest.hash,
+        "birth_hash": manifest.birth_hash(),
+        "paths": manifest.core_paths,
+    });
+    println!("{}", serde_json::to_string(&out)?);
     Ok(())
 }
 
@@ -342,18 +434,32 @@ fn handle_augment(add: Vec<String>, remove: Vec<String>, no_open: bool) -> Resul
         None
     };
 
-    // Migrate
-    let migrated = Workspace::migrate_pocket(
-        &workspace,
-        new_paths,
-        existing_ws.as_ref(),
-    )?;
+    // In-place update: rewrite workspace file + manifest, pocket dir stays put
+    let updated_workspace = Workspace {
+        hash: workspace.hash.clone(),
+        core_paths: new_paths.clone(),
+        sidecar_paths: workspace.sidecar_paths.clone(),
+        pocket_dir: workspace.pocket_dir.clone(),
+        create_readmes: false,
+    };
+    updated_workspace.write_workspace_file_preserving(existing_ws.as_ref())?;
+
+    // Update manifest in place
+    let mut manifest = match Manifest::load(&workspace.pocket_dir)? {
+        Some(m) => m,
+        None => Manifest::new(workspace.hash.clone(), workspace.core_paths.clone()),
+    };
+    manifest.update_paths(new_paths, &workspace.pocket_dir)?;
+
+    println!("{} {} (pocket dir unchanged)",
+        "Workspace updated in place:".bright_green(),
+        manifest.hash.bright_yellow()
+    );
 
     if !no_open {
-        migrated.open()?;
+        updated_workspace.open()?;
     } else {
-        println!("{} {}", "New workspace:".bright_green(), migrated.hash.bright_yellow());
-        println!("  {} {}", "Location:".dimmed(), migrated.pocket_dir.display().to_string().bright_blue());
+        println!("  {} {}", "Location:".dimmed(), workspace.pocket_dir.display().to_string().bright_blue());
     }
 
     Ok(())

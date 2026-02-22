@@ -1,0 +1,40 @@
+{
+  "name": "spocket",
+  "displayName": "Spocket - Safe Pocket Sync",
+  "description": "Real-time sync between VS Code workspace folders and spocket manifests",
+  "version": "0.1.0",
+  "publisher": "jadennation",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "Spocket",
+      "properties": {
+        "spocket.binaryPath": {
+          "type": "string",
+          "default": "spocket",
+          "description": "Path to the spocket binary"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "prepackage": "npm run compile",
+    "package": "npx @vscode/vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.0"
+  }
+}

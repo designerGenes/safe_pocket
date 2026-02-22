@@ -35,7 +35,6 @@ pub enum DriftResult {
     InSync,
     AcceptFile {
         new_core_paths: Vec<PathBuf>,
-        existing_workspace: VSCodeWorkspace,
     },
     OverwrittenFile,
     Skipped,
@@ -60,6 +59,52 @@ impl Workspace {
             .context("Failed to create .spocket directory")?;
 
         Ok(spocket_dir)
+    }
+
+    /// Find the .code-workspace file in a pocket directory.
+    /// Looks for `<dirname>.code-workspace` first, falls back to any `.code-workspace` file.
+    pub fn find_workspace_file(pocket_dir: &Path) -> Option<PathBuf> {
+        let dir_name = pocket_dir.file_name()?.to_str()?;
+        let primary = pocket_dir.join(format!("{}.code-workspace", dir_name));
+        if primary.exists() {
+            return Some(primary);
+        }
+
+        // Fallback: find any .code-workspace file
+        if let Ok(entries) = fs::read_dir(pocket_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("code-workspace") {
+                    return Some(path);
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Load manifest from a pocket directory, backfilling from workspace file if needed.
+    /// Returns (manifest, core_paths) where core_paths come from the manifest (or workspace file on backfill).
+    pub fn load_manifest_or_backfill(pocket_dir: &Path) -> Result<Option<(Manifest, Vec<PathBuf>)>> {
+        let dir_name = pocket_dir.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+
+        if let Some(manifest) = Manifest::load(pocket_dir)? {
+            let core_paths = manifest.core_paths.clone();
+            return Ok(Some((manifest, core_paths)));
+        }
+
+        // No manifest — try to backfill from workspace file
+        if Self::find_workspace_file(pocket_dir).is_none() {
+            return Ok(None);
+        }
+
+        // Use dir name as hash for backfill
+        let manifest = Manifest::backfill(pocket_dir, &dir_name)?;
+        let core_paths = manifest.core_paths.clone();
+        Ok(Some((manifest, core_paths)))
     }
 
     pub fn new(core_paths: Vec<PathBuf>, sidecar_paths: Vec<PathBuf>, create_readmes: bool) -> Result<Self> {
@@ -232,7 +277,7 @@ impl Workspace {
     }
 
     /// Build a workspace file from core_paths, optionally preserving settings from an existing workspace.
-    fn write_workspace_file_preserving(
+    pub(crate) fn write_workspace_file_preserving(
         &self,
         existing: Option<&VSCodeWorkspace>,
     ) -> Result<()> {
@@ -356,7 +401,6 @@ impl Workspace {
             "1" => {
                 Ok(DriftResult::AcceptFile {
                     new_core_paths: file_paths,
-                    existing_workspace: workspace,
                 })
             }
             "2" => {
@@ -369,75 +413,6 @@ impl Workspace {
                 Ok(DriftResult::Skipped)
             }
         }
-    }
-
-    /// Migrate a pocket to a new hash when its directory set changes.
-    /// Shared by drift resolution and augment.
-    pub fn migrate_pocket(
-        old_workspace: &Workspace,
-        new_core_paths: Vec<PathBuf>,
-        existing_ws: Option<&VSCodeWorkspace>,
-    ) -> Result<Workspace> {
-        let new_hash = hash_paths(&new_core_paths);
-        let spocket_dir = Self::spocket_dir()?;
-        let new_pocket_dir = spocket_dir.join(&new_hash);
-
-        if new_pocket_dir.exists() {
-            return Err(anyhow!(
-                "Cannot migrate: pocket {} already exists at {}",
-                new_hash,
-                new_pocket_dir.display()
-            ));
-        }
-
-        let old_hash = old_workspace.hash.clone();
-
-        // Rename old pocket dir -> new pocket dir
-        fs::rename(&old_workspace.pocket_dir, &new_pocket_dir)
-            .context("Failed to rename pocket directory")?;
-
-        // Remove old workspace file (named after old hash)
-        let old_ws_file = new_pocket_dir.join(format!("{}.code-workspace", old_hash));
-        if old_ws_file.exists() {
-            fs::remove_file(&old_ws_file)
-                .context("Failed to remove old workspace file")?;
-        }
-
-        // Create new workspace struct
-        let new_workspace = Workspace {
-            hash: new_hash.clone(),
-            core_paths: new_core_paths.clone(),
-            sidecar_paths: old_workspace.sidecar_paths.clone(),
-            pocket_dir: new_pocket_dir.clone(),
-            create_readmes: false,
-        };
-
-        // Write new workspace file (preserving settings if available)
-        new_workspace.write_workspace_file_preserving(existing_ws)?;
-
-        // Update manifest
-        let old_manifest = Manifest::load(&new_pocket_dir)?;
-        let original_created_at = old_manifest
-            .as_ref()
-            .map(|m| m.created_at)
-            .unwrap_or_else(chrono::Utc::now);
-
-        let manifest = Manifest::new_augmented(
-            new_hash.clone(),
-            new_core_paths,
-            old_hash.clone(),
-            original_created_at,
-        );
-        manifest.save(&new_pocket_dir)?;
-
-        println!("{} {} {} {}",
-            "Migrated pocket:".bright_green(),
-            old_hash.bright_yellow(),
-            "->".dimmed(),
-            new_hash.bright_yellow()
-        );
-
-        Ok(new_workspace)
     }
 
     pub fn open(&self) -> Result<()> {
@@ -555,18 +530,16 @@ impl Workspace {
                 continue;
             }
 
+            // Use manifest-based lookup
+            let (_, core_paths) = match Self::load_manifest_or_backfill(&pocket_dir)? {
+                Some(result) => result,
+                None => continue,
+            };
+
             let hash = pocket_dir.file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("")
                 .to_string();
-
-            let workspace_file = pocket_dir.join(format!("{}.code-workspace", hash));
-
-            if !workspace_file.exists() {
-                continue;
-            }
-
-            let (_, core_paths) = Self::read_workspace_file(&workspace_file, &pocket_dir)?;
 
             // Check if any folder matches the path
             for cp in &core_paths {
@@ -592,17 +565,14 @@ impl Workspace {
 
         // Check 1: Is CWD inside a ~/.spocket/<hash>/ directory?
         if cwd.starts_with(&spocket_dir) {
-            // Extract the hash component (first dir after .spocket/)
             if let Ok(relative) = cwd.strip_prefix(&spocket_dir) {
                 if let Some(hash_component) = relative.components().next() {
-                    let hash = hash_component.as_os_str().to_string_lossy().to_string();
-                    let pocket_dir = spocket_dir.join(&hash);
-                    let workspace_file = pocket_dir.join(format!("{}.code-workspace", hash));
+                    let dir_name = hash_component.as_os_str().to_string_lossy().to_string();
+                    let pocket_dir = spocket_dir.join(&dir_name);
 
-                    if workspace_file.exists() {
-                        let (_, core_paths) = Self::read_workspace_file(&workspace_file, &pocket_dir)?;
+                    if let Some((_, core_paths)) = Self::load_manifest_or_backfill(&pocket_dir)? {
                         return Ok(Some(Self {
-                            hash,
+                            hash: dir_name,
                             core_paths,
                             sidecar_paths: vec![],
                             pocket_dir,
@@ -625,18 +595,15 @@ impl Workspace {
                 continue;
             }
 
+            let (_, core_paths) = match Self::load_manifest_or_backfill(&pocket_dir)? {
+                Some(result) => result,
+                None => continue,
+            };
+
             let hash = pocket_dir.file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("")
                 .to_string();
-
-            let workspace_file = pocket_dir.join(format!("{}.code-workspace", hash));
-
-            if !workspace_file.exists() {
-                continue;
-            }
-
-            let (_, core_paths) = Self::read_workspace_file(&workspace_file, &pocket_dir)?;
 
             for cp in &core_paths {
                 if cwd == cp || cwd.starts_with(cp) {
@@ -648,6 +615,48 @@ impl Workspace {
                         create_readmes: false,
                     }));
                 }
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Secondary lookup: scan all pocket manifests for one whose current `hash`
+    /// matches `hash_paths(target_paths)`. Handles the case where paths evolved
+    /// in-place (via sync or augment) and the directory name no longer matches.
+    pub fn find_workspace_by_manifest_paths(target_paths: &[PathBuf]) -> Result<Option<Self>> {
+        let target_hash = hash_paths(target_paths);
+        let spocket_dir = Self::spocket_dir()?;
+
+        let entries = fs::read_dir(&spocket_dir)
+            .context("Failed to read .spocket directory")?;
+
+        for entry in entries {
+            let entry = entry?;
+            let pocket_dir = entry.path();
+
+            if !pocket_dir.is_dir() {
+                continue;
+            }
+
+            let manifest = match Manifest::load(&pocket_dir)? {
+                Some(m) => m,
+                None => continue,
+            };
+
+            if manifest.hash == target_hash {
+                let dir_name = pocket_dir.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                return Ok(Some(Self {
+                    hash: dir_name,
+                    core_paths: manifest.core_paths,
+                    sidecar_paths: vec![],
+                    pocket_dir,
+                    create_readmes: false,
+                }));
             }
         }
 
@@ -670,18 +679,20 @@ impl Workspace {
                 continue;
             }
 
+            // Require a workspace file to exist
+            if Self::find_workspace_file(&pocket_dir).is_none() {
+                continue;
+            }
+
+            let (_, core_paths) = match Self::load_manifest_or_backfill(&pocket_dir)? {
+                Some(result) => result,
+                None => continue,
+            };
+
             let hash = pocket_dir.file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("")
                 .to_string();
-
-            let workspace_file = pocket_dir.join(format!("{}.code-workspace", hash));
-
-            if !workspace_file.exists() {
-                continue;
-            }
-
-            let (_, core_paths) = Self::read_workspace_file(&workspace_file, &pocket_dir)?;
 
             workspaces.push(Self {
                 hash,

@@ -20,6 +20,9 @@ pub struct Manifest {
     pub augmented_from: Option<String>,
     #[serde(default = "default_version")]
     pub version: u32,
+    /// The original directory name hash. None means same as `hash`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub birth_hash: Option<String>,
 }
 
 fn default_version() -> u32 {
@@ -27,6 +30,12 @@ fn default_version() -> u32 {
 }
 
 impl Manifest {
+    /// Returns the birth hash (original directory name).
+    /// Falls back to `hash` if `birth_hash` is None (directory was never renamed).
+    pub fn birth_hash(&self) -> &str {
+        self.birth_hash.as_deref().unwrap_or(&self.hash)
+    }
+
     /// Create a fresh manifest for a new pocket.
     pub fn new(hash: String, core_paths: Vec<PathBuf>) -> Self {
         Manifest {
@@ -37,6 +46,7 @@ impl Manifest {
             children: Vec::new(),
             augmented_from: None,
             version: 1,
+            birth_hash: None,
         }
     }
 
@@ -50,25 +60,7 @@ impl Manifest {
             children: Vec::new(),
             augmented_from: None,
             version: 1,
-        }
-    }
-
-    /// Create a manifest for a pocket that was migrated via augment/drift-accept.
-    /// Preserves the original creation timestamp.
-    pub fn new_augmented(
-        hash: String,
-        core_paths: Vec<PathBuf>,
-        augmented_from: String,
-        original_created_at: DateTime<Utc>,
-    ) -> Self {
-        Manifest {
-            hash,
-            core_paths,
-            created_at: original_created_at,
-            parent_hash: None,
-            children: Vec::new(),
-            augmented_from: Some(augmented_from),
-            version: 1,
+            birth_hash: None,
         }
     }
 
@@ -111,6 +103,26 @@ impl Manifest {
         if !self.children.contains(&child_hash) {
             self.children.push(child_hash);
         }
+    }
+
+    /// Update paths in-place. Sets birth_hash on first change, updates hash and augmented_from.
+    /// The pocket directory stays put — only the manifest is rewritten.
+    pub fn update_paths(&mut self, new_core_paths: Vec<PathBuf>, pocket_dir: &Path) -> Result<()> {
+        let old_hash = self.hash.clone();
+        let new_hash = crate::hash::hash_paths(&new_core_paths);
+
+        if self.birth_hash.is_none() && new_hash != old_hash {
+            self.birth_hash = Some(old_hash.clone());
+        }
+
+        self.core_paths = new_core_paths;
+
+        if new_hash != old_hash {
+            self.augmented_from = Some(old_hash);
+        }
+
+        self.hash = new_hash;
+        self.save(pocket_dir)
     }
 
     /// Backfill a manifest for an existing pocket that has no manifest.
@@ -158,6 +170,7 @@ impl Manifest {
             children: Vec::new(),
             augmented_from: None,
             version: 1,
+            birth_hash: None,
         };
 
         manifest.save(pocket_dir)?;
@@ -182,6 +195,8 @@ mod tests {
         assert!(m.children.is_empty());
         assert!(m.augmented_from.is_none());
         assert_eq!(m.version, 1);
+        assert!(m.birth_hash.is_none());
+        assert_eq!(m.birth_hash(), "abc123");
     }
 
     #[test]
@@ -247,5 +262,90 @@ mod tests {
         assert_eq!(deserialized.parent_hash, Some("h0".to_string()));
         assert_eq!(deserialized.children, vec!["h2"]);
         assert_eq!(deserialized.augmented_from, Some("h_old".to_string()));
+    }
+
+    #[test]
+    fn test_manifest_birth_hash_convenience() {
+        let mut m = Manifest::new("abc123".to_string(), vec![]);
+        assert_eq!(m.birth_hash(), "abc123");
+
+        m.birth_hash = Some("original".to_string());
+        assert_eq!(m.birth_hash(), "original");
+    }
+
+    #[test]
+    fn test_manifest_update_paths() {
+        let tmp = std::env::temp_dir().join("spocket_update_paths_test");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let paths = vec![PathBuf::from("/test/a"), PathBuf::from("/test/b")];
+        let mut m = Manifest::new("original_hash".to_string(), paths);
+        m.hash = "original_hash".to_string();
+        m.save(&tmp).unwrap();
+
+        // Update with new paths
+        let new_paths = vec![PathBuf::from("/test/a"), PathBuf::from("/test/b"), PathBuf::from("/test/c")];
+        m.update_paths(new_paths.clone(), &tmp).unwrap();
+
+        // birth_hash should be set to original
+        assert_eq!(m.birth_hash, Some("original_hash".to_string()));
+        assert_eq!(m.birth_hash(), "original_hash");
+        // hash should be updated
+        assert_ne!(m.hash, "original_hash");
+        // augmented_from should track the old hash
+        assert_eq!(m.augmented_from, Some("original_hash".to_string()));
+        // core_paths should be updated
+        assert_eq!(m.core_paths, new_paths);
+
+        // Verify saved to disk
+        let loaded = Manifest::load(&tmp).unwrap().unwrap();
+        assert_eq!(loaded.hash, m.hash);
+        assert_eq!(loaded.birth_hash, Some("original_hash".to_string()));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_manifest_update_paths_second_change_preserves_birth_hash() {
+        let tmp = std::env::temp_dir().join("spocket_update_paths_twice_test");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let paths = vec![PathBuf::from("/test/a")];
+        let mut m = Manifest::new("first_hash".to_string(), paths);
+        m.save(&tmp).unwrap();
+
+        // First update
+        let paths2 = vec![PathBuf::from("/test/a"), PathBuf::from("/test/b")];
+        m.update_paths(paths2, &tmp).unwrap();
+        let hash_after_first = m.hash.clone();
+        assert_eq!(m.birth_hash, Some("first_hash".to_string()));
+
+        // Second update — birth_hash should NOT change
+        let paths3 = vec![PathBuf::from("/test/a"), PathBuf::from("/test/b"), PathBuf::from("/test/c")];
+        m.update_paths(paths3, &tmp).unwrap();
+        assert_eq!(m.birth_hash, Some("first_hash".to_string()));
+        assert_eq!(m.augmented_from, Some(hash_after_first));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_manifest_serialization_with_birth_hash() {
+        let mut m = Manifest::new("current".to_string(), vec![PathBuf::from("/a")]);
+        m.birth_hash = Some("original".to_string());
+
+        let json = serde_json::to_string_pretty(&m).unwrap();
+        assert!(json.contains("birth_hash"));
+        assert!(json.contains("original"));
+
+        let deserialized: Manifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.birth_hash, Some("original".to_string()));
+
+        // Without birth_hash, it should not appear in JSON
+        let m2 = Manifest::new("test".to_string(), vec![]);
+        let json2 = serde_json::to_string_pretty(&m2).unwrap();
+        assert!(!json2.contains("birth_hash"));
     }
 }

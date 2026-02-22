@@ -54,6 +54,14 @@ pub enum Commands {
     #[command(name = "list-workspaces")]
     ListWorkspaces,
 
+    /// Sync manifest with workspace file (called by VS Code extension)
+    #[command(name = "sync")]
+    Sync {
+        /// Path to the pocket directory
+        #[arg(long = "pocket", value_name = "PATH")]
+        pocket: String,
+    },
+
     /// Add or remove directories from the current workspace
     #[command(name = "augment")]
     Augment {
