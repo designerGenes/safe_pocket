@@ -15,8 +15,7 @@ impl Config {
             .context("Failed to get config directory")?
             .join("spocket");
 
-        fs::create_dir_all(&config_dir)
-            .context("Failed to create config directory")?;
+        fs::create_dir_all(&config_dir).context("Failed to create config directory")?;
 
         Ok(config_dir)
     }
@@ -32,22 +31,19 @@ impl Config {
             return Ok(Config::default());
         }
 
-        let content = fs::read_to_string(&path)
-            .context("Failed to read config file")?;
+        let content = fs::read_to_string(&path).context("Failed to read config file")?;
 
-        let config: Config = serde_json::from_str(&content)
-            .context("Failed to parse config file")?;
+        let config: Config =
+            serde_json::from_str(&content).context("Failed to parse config file")?;
 
         Ok(config)
     }
 
     pub fn save(&self) -> Result<()> {
         let path = Self::config_path()?;
-        let content = serde_json::to_string_pretty(self)
-            .context("Failed to serialize config")?;
+        let content = serde_json::to_string_pretty(self).context("Failed to serialize config")?;
 
-        fs::write(&path, content)
-            .context("Failed to write config file")?;
+        fs::write(&path, content).context("Failed to write config file")?;
 
         Ok(())
     }
@@ -70,14 +66,14 @@ impl Config {
         }
 
         // Otherwise, expand and canonicalize the path
-        let expanded = shellexpand::full(path)
-            .context("Failed to expand path")?;
+        let expanded = shellexpand::full(path).context("Failed to expand path")?;
 
         let path_buf = PathBuf::from(expanded.as_ref());
 
         // Canonicalize to get absolute path
         if path_buf.exists() {
-            path_buf.canonicalize()
+            path_buf
+                .canonicalize()
                 .context("Failed to canonicalize path")
         } else {
             Ok(path_buf)

@@ -19,9 +19,9 @@ pub struct Cli {
     #[arg(long = "clone-from", value_name = "PATH")]
     pub clone_from: Option<String>,
 
-    /// Include Beads setup (placeholder)
-    #[arg(long = "with-beads")]
-    pub with_beads: bool,
+    /// Enable optional features (e.g. --use beads)
+    #[arg(long = "use", value_name = "FEATURE")]
+    pub use_features: Vec<String>,
 
     /// Skip creating README files in empty directories
     #[arg(long = "no-readme")]

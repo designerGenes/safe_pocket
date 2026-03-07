@@ -33,9 +33,7 @@ pub struct WorkspaceFolder {
 
 pub enum DriftResult {
     InSync,
-    AcceptFile {
-        new_core_paths: Vec<PathBuf>,
-    },
+    AcceptFile { new_core_paths: Vec<PathBuf> },
     OverwrittenFile,
     Skipped,
 }
@@ -50,13 +48,11 @@ pub struct Workspace {
 
 impl Workspace {
     pub fn spocket_dir() -> Result<PathBuf> {
-        let home = dirs::home_dir()
-            .context("Failed to get home directory")?;
+        let home = dirs::home_dir().context("Failed to get home directory")?;
 
         let spocket_dir = home.join(".spocket");
 
-        fs::create_dir_all(&spocket_dir)
-            .context("Failed to create .spocket directory")?;
+        fs::create_dir_all(&spocket_dir).context("Failed to create .spocket directory")?;
 
         Ok(spocket_dir)
     }
@@ -85,8 +81,11 @@ impl Workspace {
 
     /// Load manifest from a pocket directory, backfilling from workspace file if needed.
     /// Returns (manifest, core_paths) where core_paths come from the manifest (or workspace file on backfill).
-    pub fn load_manifest_or_backfill(pocket_dir: &Path) -> Result<Option<(Manifest, Vec<PathBuf>)>> {
-        let dir_name = pocket_dir.file_name()
+    pub fn load_manifest_or_backfill(
+        pocket_dir: &Path,
+    ) -> Result<Option<(Manifest, Vec<PathBuf>)>> {
+        let dir_name = pocket_dir
+            .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("")
             .to_string();
@@ -107,7 +106,11 @@ impl Workspace {
         Ok(Some((manifest, core_paths)))
     }
 
-    pub fn new(core_paths: Vec<PathBuf>, sidecar_paths: Vec<PathBuf>, create_readmes: bool) -> Result<Self> {
+    pub fn new(
+        core_paths: Vec<PathBuf>,
+        sidecar_paths: Vec<PathBuf>,
+        create_readmes: bool,
+    ) -> Result<Self> {
         let hash = hash_paths(&core_paths);
         let pocket_dir = Self::spocket_dir()?.join(&hash);
 
@@ -121,7 +124,8 @@ impl Workspace {
     }
 
     pub fn workspace_file_path(&self) -> PathBuf {
-        self.pocket_dir.join(format!("{}.code-workspace", self.hash))
+        self.pocket_dir
+            .join(format!("{}.code-workspace", self.hash))
     }
 
     pub fn exists(&self) -> bool {
@@ -150,45 +154,76 @@ impl Workspace {
         let manifest = Manifest::new(self.hash.clone(), self.core_paths.clone());
         manifest.save(&self.pocket_dir)?;
 
-        println!("{} {}", "Created workspace:".bright_green(), self.hash.bright_yellow());
-        println!("  {} {}", "Location:".dimmed(), self.pocket_dir.display().to_string().bright_blue());
+        println!(
+            "{} {}",
+            "Created workspace:".bright_green(),
+            self.hash.bright_yellow()
+        );
+        println!(
+            "  {} {}",
+            "Location:".dimmed(),
+            self.pocket_dir.display().to_string().bright_blue()
+        );
 
         Ok(())
     }
 
     fn create_pocket_structure(&self) -> Result<()> {
-        fs::create_dir_all(&self.pocket_dir)
-            .context("Failed to create pocket directory")?;
+        fs::create_dir_all(&self.pocket_dir).context("Failed to create pocket directory")?;
 
-        // Create README in root if enabled
+        let pocket_dir_str = self.pocket_dir.to_string_lossy();
+
+        // Build a formatted list of core paths for use in templates
+        let core_paths_list = self
+            .core_paths
+            .iter()
+            .map(|p| format!("- {}", p.display()))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Primary project path (first core path) used in templates
+        let primary_project_path = self
+            .core_paths
+            .first()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "<project path>".to_string());
+
+        // ── Root README.md ────────────────────────────────────────────────────
         if self.create_readmes {
             let readme = self.pocket_dir.join("README.md");
             fs::write(
                 &readme,
-                format!("# Safe Pocket: {}\n\nThis is a Safe Pocket workspace directory. It contains:\n\n\
-                - `.github/copilot-instructions.md` - Custom AI copilot instructions\n\
-                - `.github/prompts/` - Reusable prompt templates\n\
-                - `FEATURES/` - Feature ideas and documentation\n\
-                - `observations/` - AI-generated insights and learnings\n\n\
-                ## Usage\n\n\
-                This directory is automatically managed by spocket. Edit the files above to customize \
-                your AI assistant's behavior for the workspace directories:\n\n{}\n\n\
-                Learn more: https://github.com/your-repo/safe_pocket\n",
-                self.hash,
-                self.core_paths.iter()
-                    .map(|p| format!("- {}", p.display()))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-                )
+                format!(
+                    "# Safe Pocket: {hash}\n\n\
+                    This is a Safe Pocket workspace directory. It contains:\n\n\
+                    - `.github/copilot-instructions.md` - Custom AI copilot instructions\n\
+                    - `.github/prompts/` - Reusable prompt templates\n\
+                    - `FEATURES/` - Feature ideas and documentation\n\
+                    - `observations/` - AI-generated insights and learnings\n\n\
+                    ## Usage\n\n\
+                    This directory is automatically managed by spocket. Edit the files above to customize \
+                    your AI assistant's behavior for the workspace directories:\n\n\
+                    {paths}\n\n\
+                    Learn more: https://github.com/your-repo/safe_pocket\n",
+                    hash = self.hash,
+                    paths = core_paths_list,
+                ),
             )
             .context("Failed to create README.md")?;
         }
 
-        // Create .github/prompts/
-        let github_prompts = self.pocket_dir.join(".github").join("prompts");
+        // ── .github/ subdirectories ───────────────────────────────────────────
+        let github_dir = self.pocket_dir.join(".github");
+        let github_prompts = github_dir.join("prompts");
+        let github_agents = github_dir.join("agents");
+        let github_skills = github_dir.join("skills");
+
         fs::create_dir_all(&github_prompts)
             .context("Failed to create .github/prompts directory")?;
+        fs::create_dir_all(&github_agents).context("Failed to create .github/agents directory")?;
+        fs::create_dir_all(&github_skills).context("Failed to create .github/skills directory")?;
 
+        // .github/prompts/README.md
         if self.create_readmes {
             let prompts_readme = github_prompts.join("README.md");
             fs::write(
@@ -203,23 +238,244 @@ impl Workspace {
                 - Performance issues\n\
                 - Code style consistency\n\
                 ```\n\n\
-                Then reference it in your copilot conversations.\n"
+                Then reference it in your copilot conversations.\n",
             )
             .context("Failed to create prompts README.md")?;
         }
 
-        // Create copilot-instructions.md
-        let copilot_instructions = self.pocket_dir.join(".github").join("copilot-instructions.md");
+        // .github/copilot-instructions.md — rich templated content
+        let copilot_instructions = github_dir.join("copilot-instructions.md");
         fs::write(
             &copilot_instructions,
-            "# Copilot Instructions\n\nAdd your custom copilot instructions here.\n",
+            format!(
+                "# Project folder versus safe pocket folder\n\n\
+                This file is contained inside a subdirectory of\n\
+                {pocket_dir}\n\n\
+                That folder is a \"safe pocket\" folder. It is NOT the \"project folder\". \
+                The safe pocket folder contains \"meta files\" which are relevant only to the \
+                actual project folder. The actual project folder is\n\
+                {project_path}\n\n\
+                All commands made to the agent are intended to be applied to the project folder, \
+                not the safe pocket folder. The safe pocket folder is only for storing meta files \
+                that are relevant to the project folder. The agent should never make any changes \
+                to the safe pocket folder, only read from it.\n\n\
+                For example, if the agent is asked to review our codebase, it should read the code \
+                files from the project folder, not the safe pocket folder. The safe pocket folder \
+                may contain instructions or other meta files that are relevant to the project folder, \
+                but the actual code files are in the project folder.\n\n\
+                # Rules\n\n\
+                1. You must always use full paths whenever you reference any file or directory. \
+                NEVER use relative paths.\n\
+                2. If instructed to use a \"cli app\" or \"terminal command\", you should run this \
+                command in the context of the project folder, not the safe pocket folder. You should \
+                also always try to run the literal command you are told to use, before searching for \
+                python files or source code. For example, if I tell you \"use the cli app sponge_bob \
+                to do X\", you must first attempt to run the command \"sponge_bob\" in the terminal, \
+                and only if that fails should you search for a python file or source code that might \
+                be relevant.\n\
+                3. All python dependencies and environments are managed by 'uv', never by 'pip'.\n\n\
+                # Observations Logging\n\n\
+                As you work, you will inevitably discover significant insights about the project, \
+                codebase, patterns, bugs, conventions, and other noteworthy findings. You are \
+                required to actively log these as \"observation\" files in the safe pocket folder.\n\n\
+                ## What qualifies as an Observation\n\n\
+                Log an observation whenever you discover any of the following:\n\
+                - Architectural patterns or design decisions in the codebase\n\
+                - Recurring bugs, anti-patterns, or footguns\n\
+                - Non-obvious conventions or project-specific idioms\n\
+                - Important constraints (e.g., dependency quirks, environment limitations)\n\
+                - Useful techniques or shortcuts specific to this project\n\
+                - Surprising or counter-intuitive behavior you encounter\n\
+                - Decisions made during a session that future sessions should know about\n\n\
+                When in doubt, log it. Observations are cheap to create and valuable to retain.\n\n\
+                ## Where to write Observations\n\n\
+                Always write observation files to:\n\
+                ```\n\
+                {pocket_dir}/observations/\n\
+                ```\n\n\
+                This is the safe pocket folder — writing here is explicitly permitted for observation logging.\n\n\
+                ## Naming Convention\n\n\
+                Name each file using the following format:\n\
+                ```\n\
+                YYYY-MM-DD--<slug>.md\n\
+                ```\n\n\
+                Where `<slug>` is a short, lowercase, hyphen-separated summary of the observation's \
+                subject derived from its content. The slug should be specific enough to be meaningful \
+                at a glance.\n\n\
+                Examples:\n\
+                - `2025-06-10--uv-env-not-activated-by-default.md`\n\
+                - `2025-06-10--project-uses-ruff-not-black.md`\n\
+                - `2025-06-11--api-auth-token-stored-in-dotenv.md`\n\n\
+                Do NOT use generic slugs like `observation-1` or `misc-finding`.\n\n\
+                ## File Format\n\n\
+                Each observation file should be a short Markdown file with the following structure:\n\n\
+                ```markdown\n\
+                # <Title of Observation>\n\n\
+                **Date:** YYYY-MM-DD  \n\
+                **Context:** <Brief description of what you were doing when you made this observation>\n\n\
+                ## Finding\n\n\
+                <Clear, concise description of what you observed.>\n\n\
+                ## Why It Matters\n\n\
+                <Why this is worth knowing for future sessions or contributors.>\n\n\
+                ## Notes\n\n\
+                <Any additional details, caveats, or related links. Omit if not needed.>\n\
+                ```\n\n\
+                Keep observations focused. One observation per file. Split large findings into \
+                multiple files if needed.\n",
+                pocket_dir = pocket_dir_str,
+                project_path = primary_project_path,
+            ),
         )
         .context("Failed to create copilot-instructions.md")?;
 
-        // Create FEATURES/00.md
+        // ── AGENTS.md (root) ──────────────────────────────────────────────────
+        let agents_md = self.pocket_dir.join("AGENTS.md");
+        // Build the project layout table rows
+        let layout_rows = self
+            .core_paths
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let label = if i == 0 {
+                    "**Project folder** — all source code lives here"
+                } else {
+                    "**Additional project folder**"
+                };
+                format!("| `{}` | {} |", p.display(), label)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        fs::write(
+            &agents_md,
+            format!(
+                "# Agent Instructions\n\n\
+                ## Project Layout\n\n\
+                | Path | Purpose |\n\
+                |------|---------|\n\
+                {layout_rows}\n\
+                | `{pocket_dir}` | **Safe pocket** — meta/config files only (read-only) |\n\n\
+                All agent work targets the **project folder**. Never modify the safe pocket folder.\n\n\
+                > **Beads database location:** The `.beads/` database lives in the **safe pocket**, not the project folder.\n\
+                > A stub `.beads/redirect` file in the project folder points `bd` to the correct location automatically.\n\
+                > Run all `bd` commands from the project folder — they will resolve correctly via the redirect.\n\n\
+                ## Absolute Rules\n\n\
+                1. **Always use full absolute paths.** Never use relative paths in any file reference or command.\n\
+                2. **Run CLI commands in the project folder context.** If told to use a CLI tool (e.g. `some_tool`), \
+                run it literally first; only search source code if the command fails.\n\
+                3. **Python dependencies use `uv`, never `pip`.** Install packages with `uv add <pkg>`, \
+                run scripts with `uv run <script>`.\n\n\
+                ---\n\n\
+                ## Build / Lint / Test Commands\n\n\
+                > No source code exists yet. Add commands here as the project grows.\n\n\
+                **Python (when applicable):**\n\
+                ```bash\n\
+                uv run pytest                        # Run all tests\n\
+                uv run pytest tests/test_foo.py      # Run a single test file\n\
+                uv run pytest tests/test_foo.py::test_bar  # Run a single test\n\
+                uv run ruff check .                  # Lint\n\
+                uv run ruff format .                 # Format\n\
+                uv run mypy .                        # Type check\n\
+                ```\n\n\
+                **General:**\n\
+                ```bash\n\
+                uv sync                              # Install/sync dependencies\n\
+                uv run pre-commit run --all-files    # Run all pre-commit hooks\n\
+                ```\n\n\
+                ---\n\n\
+                ## Code Style Guidelines\n\n\
+                - **Language**: Prefer Python unless another language is clearly appropriate.\n\
+                - **Formatting**: Use `ruff format` (88-char line length). Never hand-format what a tool can do.\n\
+                - **Linting**: `ruff check` with auto-fix (`--fix`) where safe.\n\
+                - **Types**: Annotate all function signatures. Use `mypy` for type checking.\n\
+                - **Naming**: `snake_case` for functions/variables, `PascalCase` for classes, `UPPER_SNAKE` for constants.\n\
+                - **Imports**: stdlib → third-party → local, separated by blank lines. Absolute imports only.\n\
+                - **Error handling**: Raise specific exceptions; never bare `except:`. Log at the call site or let it propagate — not both.\n\
+                - **Docstrings**: Google-style for public functions/classes.\n\n\
+                ---\n\n\
+                ## Issue Tracking with bd (beads)\n\n\
+                **IMPORTANT**: Use **bd** for ALL task tracking. Do NOT use markdown TODOs or external trackers.\n\n\
+                **Quick Reference:**\n\
+                ```bash\n\
+                bd ready                              # Find available (unblocked) work\n\
+                bd ready --json                       # Machine-readable output\n\
+                bd show <id>                          # View issue details\n\
+                bd update <id> --claim --json         # Claim work atomically\n\
+                bd close <id> --reason \"Done\" --json  # Complete work\n\
+                bd sync                               # Sync with git\n\
+                ```\n\n\
+                **Create issues:**\n\
+                ```bash\n\
+                bd create \"Title\" --description=\"Context\" -t bug|feature|task|epic|chore -p 0-4 --json\n\
+                bd create \"Found bug\" --description=\"Details\" -p 1 --deps discovered-from:<parent-id> --json\n\
+                ```\n\n\
+                ### Issue Types\n\
+                - `bug` — Something broken\n\
+                - `feature` — New functionality\n\
+                - `task` — Tests, docs, refactoring\n\
+                - `epic` — Large feature with subtasks\n\
+                - `chore` — Maintenance (deps, tooling)\n\n\
+                ### Priorities\n\
+                - `0` — Critical (security, data loss, broken builds)\n\
+                - `1` — High (major features, important bugs)\n\
+                - `2` — Medium (default)\n\
+                - `3` — Low (polish, optimization)\n\
+                - `4` — Backlog (future ideas)\n\n\
+                ### Workflow\n\
+                1. `bd ready` — find unblocked issues\n\
+                2. `bd update <id> --claim` — claim atomically\n\
+                3. Implement, test, document\n\
+                4. Discovered new work? `bd create \"...\" --deps discovered-from:<id>`\n\
+                5. `bd close <id> --reason \"Done\"`\n\n\
+                ### Rules\n\
+                - Always use `--json` for programmatic/agent use\n\
+                - Link discovered work with `discovered-from` dependencies\n\
+                - Auto-sync: `.beads/issues.jsonl` exports after changes (5s debounce)\n\
+                - Never create markdown TODO lists or duplicate tracking systems\n\n\
+                ---\n\n\
+                ## Non-Interactive Shell Commands\n\n\
+                Shell aliases may add `-i` (interactive) flags, causing agents to hang. Always force non-interactive:\n\n\
+                ```bash\n\
+                cp -f source dest          # NOT: cp source dest\n\
+                mv -f source dest          # NOT: mv source dest\n\
+                rm -f file                 # NOT: rm file\n\
+                rm -rf directory           # NOT: rm -r directory\n\
+                cp -rf source dest         # NOT: cp -r source dest\n\
+                ```\n\n\
+                Other commands:\n\
+                - `git log` / `git diff` — add `--no-pager`\n\
+                - `git commit` — always `-m \"msg\"`, never bare\n\
+                - `apt-get` — use `-y`\n\
+                - `brew` — set `HOMEBREW_NO_AUTO_UPDATE=1`\n\n\
+                ---\n\n\
+                ## Landing the Plane (Session Completion)\n\n\
+                Work is **NOT complete** until `git push` succeeds. Complete ALL steps:\n\n\
+                1. **File issues** for any remaining or follow-up work\n\
+                2. **Run quality gates** (tests, lint, type check) if code changed\n\
+                3. **Update issue status** — close finished, update in-progress\n\
+                4. **Push to remote:**\n\
+                   ```bash\n\
+                   git pull --rebase\n\
+                   bd sync\n\
+                   git push\n\
+                   git status   # Must show \"up to date with origin\"\n\
+                   ```\n\
+                5. **Verify** — all changes committed AND pushed\n\
+                6. **Hand off** — summarize context for next session\n\n\
+                **NEVER** stop before pushing. **NEVER** say \"ready to push when you are\" — YOU must push.\n",
+                layout_rows = layout_rows,
+                pocket_dir = pocket_dir_str,
+            ),
+        )
+        .context("Failed to create AGENTS.md")?;
+
+        // ── .env (empty) ──────────────────────────────────────────────────────
+        let env_file = self.pocket_dir.join(".env");
+        fs::write(&env_file, "").context("Failed to create .env")?;
+
+        // ── FEATURES/00.md ────────────────────────────────────────────────────
         let features_dir = self.pocket_dir.join("FEATURES");
-        fs::create_dir_all(&features_dir)
-            .context("Failed to create FEATURES directory")?;
+        fs::create_dir_all(&features_dir).context("Failed to create FEATURES directory")?;
 
         let features_file = features_dir.join("00.md");
         fs::write(
@@ -228,10 +484,9 @@ impl Workspace {
         )
         .context("Failed to create FEATURES/00.md")?;
 
-        // Create observations/
+        // ── observations/ ─────────────────────────────────────────────────────
         let observations_dir = self.pocket_dir.join("observations");
-        fs::create_dir_all(&observations_dir)
-            .context("Failed to create observations directory")?;
+        fs::create_dir_all(&observations_dir).context("Failed to create observations directory")?;
 
         if self.create_readmes {
             let observations_readme = observations_dir.join("README.md");
@@ -257,14 +512,17 @@ impl Workspace {
 
     /// Read and parse a workspace file, returning the parsed struct and the extracted core paths.
     /// Filters out the pocket directory folder using path prefix matching.
-    pub fn read_workspace_file(workspace_file: &Path, pocket_dir: &Path) -> Result<(VSCodeWorkspace, Vec<PathBuf>)> {
+    pub fn read_workspace_file(
+        workspace_file: &Path,
+        pocket_dir: &Path,
+    ) -> Result<(VSCodeWorkspace, Vec<PathBuf>)> {
         let spocket_dir = Self::spocket_dir()?;
 
-        let content = fs::read_to_string(workspace_file)
-            .context("Failed to read workspace file")?;
+        let content =
+            fs::read_to_string(workspace_file).context("Failed to read workspace file")?;
 
-        let workspace: VSCodeWorkspace = serde_json::from_str(&content)
-            .context("Failed to parse workspace file")?;
+        let workspace: VSCodeWorkspace =
+            serde_json::from_str(&content).context("Failed to parse workspace file")?;
 
         let core_paths: Vec<PathBuf> = workspace
             .folders
@@ -317,12 +575,11 @@ impl Workspace {
             }
         };
 
-        let workspace_json = serde_json::to_string_pretty(&workspace)
-            .context("Failed to serialize workspace")?;
+        let workspace_json =
+            serde_json::to_string_pretty(&workspace).context("Failed to serialize workspace")?;
 
         let workspace_path = self.workspace_file_path();
-        fs::write(&workspace_path, workspace_json)
-            .context("Failed to write workspace file")?;
+        fs::write(&workspace_path, workspace_json).context("Failed to write workspace file")?;
 
         Ok(())
     }
@@ -339,7 +596,93 @@ impl Workspace {
             .context("Failed to execute git init")?;
 
         if !output.status.success() {
-            return Err(anyhow!("Git init failed: {}", String::from_utf8_lossy(&output.stderr)));
+            return Err(anyhow!(
+                "Git init failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Set up Beads issue tracking in the safe pocket, and plant redirect stubs in every
+    /// core project folder so `bd` commands work from the project directory.
+    ///
+    /// Idempotent: skips `bd init` if `.beads/` already exists in the pocket.
+    pub fn setup_beads(&self) -> Result<()> {
+        let beads_dir = self.pocket_dir.join(".beads");
+
+        // ── 1. Run `bd init` inside the pocket directory (only if not already done) ──
+        if beads_dir.exists() {
+            println!(
+                "{} {}",
+                "Beads already initialised in pocket:".dimmed(),
+                self.hash.bright_yellow()
+            );
+        } else {
+            println!("{}", "Initialising Beads in safe pocket...".bright_white());
+
+            let output = Command::new("bd")
+                .args(["init", "--backend", "dolt"])
+                .current_dir(&self.pocket_dir)
+                .output()
+                .context("Failed to execute `bd init` — is `bd` installed and on PATH?")?;
+
+            if !output.status.success() {
+                return Err(anyhow!(
+                    "bd init failed:\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+
+            println!(
+                "{} {}",
+                "Beads initialised in:".bright_green(),
+                beads_dir.display().to_string().bright_blue()
+            );
+        }
+
+        // ── 2. Plant `.beads/redirect` stub in every core project folder ──────────
+        let beads_dir_str = beads_dir.to_string_lossy().into_owned();
+
+        for project_path in &self.core_paths {
+            let project_beads_dir = project_path.join(".beads");
+            let redirect_file = project_beads_dir.join("redirect");
+
+            // Check if redirect already points to the right place (idempotent)
+            if redirect_file.exists() {
+                let existing = fs::read_to_string(&redirect_file).unwrap_or_default();
+                if existing.trim() == beads_dir_str.trim() {
+                    println!(
+                        "{} {} {}",
+                        "Redirect already set in:".dimmed(),
+                        project_path.display().to_string().bright_blue(),
+                        "(unchanged)".dimmed()
+                    );
+                    continue;
+                }
+            }
+
+            fs::create_dir_all(&project_beads_dir).with_context(|| {
+                format!(
+                    "Failed to create .beads/ in project folder: {}",
+                    project_path.display()
+                )
+            })?;
+
+            fs::write(&redirect_file, &beads_dir_str).with_context(|| {
+                format!(
+                    "Failed to write .beads/redirect in: {}",
+                    project_path.display()
+                )
+            })?;
+
+            println!(
+                "{} {} → {}",
+                "Beads redirect planted in:".bright_green(),
+                project_path.display().to_string().bright_blue(),
+                beads_dir_str.bright_yellow()
+            );
         }
 
         Ok(())
@@ -364,8 +707,15 @@ impl Workspace {
         }
 
         // Determine added and removed folders
-        let added: Vec<_> = file_paths.iter().filter(|p| !core_set.contains(p)).collect();
-        let removed: Vec<_> = self.core_paths.iter().filter(|p| !file_set.contains(p)).collect();
+        let added: Vec<_> = file_paths
+            .iter()
+            .filter(|p| !core_set.contains(p))
+            .collect();
+        let removed: Vec<_> = self
+            .core_paths
+            .iter()
+            .filter(|p| !file_set.contains(p))
+            .collect();
 
         println!("\n{}", "Workspace drift detected!".bright_yellow().bold());
 
@@ -384,8 +734,14 @@ impl Workspace {
         }
 
         println!();
-        println!("  {}  Accept workspace file as truth (migrate pocket)", "1.".bright_yellow());
-        println!("  {}  Overwrite file to match original directories", "2.".bright_yellow());
+        println!(
+            "  {}  Accept workspace file as truth (migrate pocket)",
+            "1.".bright_yellow()
+        );
+        println!(
+            "  {}  Overwrite file to match original directories",
+            "2.".bright_yellow()
+        );
         println!("  {}  Do nothing", "3.".bright_yellow());
         println!();
 
@@ -398,14 +754,15 @@ impl Workspace {
         let input = input.trim();
 
         match input {
-            "1" => {
-                Ok(DriftResult::AcceptFile {
-                    new_core_paths: file_paths,
-                })
-            }
+            "1" => Ok(DriftResult::AcceptFile {
+                new_core_paths: file_paths,
+            }),
             "2" => {
                 self.write_workspace_file_preserving(Some(&workspace))?;
-                println!("{}", "Workspace file overwritten to match original directories.".bright_green());
+                println!(
+                    "{}",
+                    "Workspace file overwritten to match original directories.".bright_green()
+                );
                 Ok(DriftResult::OverwrittenFile)
             }
             _ => {
@@ -424,7 +781,8 @@ impl Workspace {
 
         // If there are sidecars, we need to temporarily add them
         if !self.sidecar_paths.is_empty() {
-            println!("Adding {} sidecar directories...",
+            println!(
+                "Adding {} sidecar directories...",
                 self.sidecar_paths.len().to_string().bright_yellow()
             );
 
@@ -436,7 +794,10 @@ impl Workspace {
                     0,
                     WorkspaceFolder {
                         path: path.to_string_lossy().to_string(),
-                        name: Some(format!("[Sidecar] {}", path.file_name().unwrap_or_default().to_string_lossy())),
+                        name: Some(format!(
+                            "[Sidecar] {}",
+                            path.file_name().unwrap_or_default().to_string_lossy()
+                        )),
                     },
                 );
             }
@@ -445,12 +806,15 @@ impl Workspace {
             let workspace_json = serde_json::to_string_pretty(&workspace)
                 .context("Failed to serialize workspace")?;
 
-            fs::write(&workspace_path, workspace_json)
-                .context("Failed to write workspace file")?;
+            fs::write(&workspace_path, workspace_json).context("Failed to write workspace file")?;
         }
 
         println!("{}", "Opening workspace in VS Code...".bright_cyan());
-        println!("  {} {}", "File:".dimmed(), workspace_path.display().to_string().bright_blue());
+        println!(
+            "  {} {}",
+            "File:".dimmed(),
+            workspace_path.display().to_string().bright_blue()
+        );
 
         // Open in VS Code
         let output = Command::new("code")
@@ -459,7 +823,10 @@ impl Workspace {
             .context("Failed to open VS Code")?;
 
         if !output.status.success() {
-            return Err(anyhow!("Failed to open VS Code: {}", String::from_utf8_lossy(&output.stderr)));
+            return Err(anyhow!(
+                "Failed to open VS Code: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
         }
 
         Ok(())
@@ -470,12 +837,16 @@ impl Workspace {
         let source_workspace = Self::find_workspace_containing(source_path)?;
 
         if source_workspace.is_none() {
-            return Err(anyhow!("No workspace found containing path: {}", source_path.display()));
+            return Err(anyhow!(
+                "No workspace found containing path: {}",
+                source_path.display()
+            ));
         }
 
         let source_workspace = source_workspace.unwrap();
 
-        println!("Cloning from workspace: {}",
+        println!(
+            "Cloning from workspace: {}",
             source_workspace.hash.bright_yellow()
         );
 
@@ -508,7 +879,8 @@ impl Workspace {
             let _ = parent_manifest.save(&source_workspace.pocket_dir);
         }
 
-        println!("{} {}",
+        println!(
+            "{} {}",
             "Cloned to:".bright_green(),
             target_workspace.hash.bright_yellow()
         );
@@ -519,8 +891,7 @@ impl Workspace {
     pub fn find_workspace_containing(path: &Path) -> Result<Option<Self>> {
         let spocket_dir = Self::spocket_dir()?;
 
-        let entries = fs::read_dir(&spocket_dir)
-            .context("Failed to read .spocket directory")?;
+        let entries = fs::read_dir(&spocket_dir).context("Failed to read .spocket directory")?;
 
         for entry in entries {
             let entry = entry?;
@@ -536,7 +907,8 @@ impl Workspace {
                 None => continue,
             };
 
-            let hash = pocket_dir.file_name()
+            let hash = pocket_dir
+                .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("")
                 .to_string();
@@ -584,8 +956,7 @@ impl Workspace {
         }
 
         // Check 2: Is CWD inside (or equal to) any workspace's core_paths?
-        let entries = fs::read_dir(&spocket_dir)
-            .context("Failed to read .spocket directory")?;
+        let entries = fs::read_dir(&spocket_dir).context("Failed to read .spocket directory")?;
 
         for entry in entries {
             let entry = entry?;
@@ -600,7 +971,8 @@ impl Workspace {
                 None => continue,
             };
 
-            let hash = pocket_dir.file_name()
+            let hash = pocket_dir
+                .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("")
                 .to_string();
@@ -628,8 +1000,7 @@ impl Workspace {
         let target_hash = hash_paths(target_paths);
         let spocket_dir = Self::spocket_dir()?;
 
-        let entries = fs::read_dir(&spocket_dir)
-            .context("Failed to read .spocket directory")?;
+        let entries = fs::read_dir(&spocket_dir).context("Failed to read .spocket directory")?;
 
         for entry in entries {
             let entry = entry?;
@@ -645,7 +1016,8 @@ impl Workspace {
             };
 
             if manifest.hash == target_hash {
-                let dir_name = pocket_dir.file_name()
+                let dir_name = pocket_dir
+                    .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("")
                     .to_string();
@@ -668,8 +1040,7 @@ impl Workspace {
 
         let mut workspaces = Vec::new();
 
-        let entries = fs::read_dir(&spocket_dir)
-            .context("Failed to read .spocket directory")?;
+        let entries = fs::read_dir(&spocket_dir).context("Failed to read .spocket directory")?;
 
         for entry in entries {
             let entry = entry?;
@@ -689,7 +1060,8 @@ impl Workspace {
                 None => continue,
             };
 
-            let hash = pocket_dir.file_name()
+            let hash = pocket_dir
+                .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("")
                 .to_string();
@@ -724,7 +1096,10 @@ impl Workspace {
 
     /// Find workspaces similar to the given paths
     /// Returns workspaces sorted by similarity (most similar first)
-    pub fn find_similar_workspaces(target_paths: &[PathBuf], min_similarity: f64) -> Result<Vec<(Self, f64)>> {
+    pub fn find_similar_workspaces(
+        target_paths: &[PathBuf],
+        min_similarity: f64,
+    ) -> Result<Vec<(Self, f64)>> {
         let all_workspaces = Self::list_all()?;
         let mut similar: Vec<(Self, f64)> = Vec::new();
 
@@ -750,12 +1125,16 @@ impl Workspace {
         }
 
         println!("\n{}", "Similar workspaces found!".bright_white());
-        println!("{}", "These workspaces share directories with your new workspace:".dimmed());
+        println!(
+            "{}",
+            "These workspaces share directories with your new workspace:".dimmed()
+        );
         println!();
 
         for (i, (workspace, similarity)) in candidates.iter().enumerate() {
             let percentage = (similarity * 100.0) as u32;
-            println!("  {}. {} {}% similarity",
+            println!(
+                "  {}. {} {}% similarity",
                 (i + 1).to_string().bright_yellow(),
                 workspace.hash.bright_blue(),
                 percentage.to_string().bright_green()
@@ -763,17 +1142,22 @@ impl Workspace {
 
             // Show shared directories
             for path in &workspace.core_paths {
-                println!("     - {}",
-                    path.display().to_string().dimmed()
-                );
+                println!("     - {}", path.display().to_string().dimmed());
             }
             println!();
         }
 
-        println!("  {}. {}", "0".bright_yellow(), "Don't clone (create fresh workspace)".dimmed());
+        println!(
+            "  {}. {}",
+            "0".bright_yellow(),
+            "Don't clone (create fresh workspace)".dimmed()
+        );
         println!();
 
-        print!("{} ", "Select a workspace to clone from (0-{}, or press Enter to skip):".bright_white());
+        print!(
+            "{} ",
+            "Select a workspace to clone from (0-{}, or press Enter to skip):".bright_white()
+        );
         use std::io::{self, Write as IoWrite};
         io::stdout().flush()?;
 
@@ -791,7 +1175,10 @@ impl Workspace {
             }
         }
 
-        println!("{}", "Invalid selection, creating fresh workspace".bright_yellow());
+        println!(
+            "{}",
+            "Invalid selection, creating fresh workspace".bright_yellow()
+        );
         Ok(None)
     }
 }
@@ -821,14 +1208,8 @@ mod tests {
 
     #[test]
     fn test_calculate_similarity_identical() {
-        let paths1 = vec![
-            PathBuf::from("/path/a"),
-            PathBuf::from("/path/b"),
-        ];
-        let paths2 = vec![
-            PathBuf::from("/path/b"),
-            PathBuf::from("/path/a"),
-        ];
+        let paths1 = vec![PathBuf::from("/path/a"), PathBuf::from("/path/b")];
+        let paths2 = vec![PathBuf::from("/path/b"), PathBuf::from("/path/a")];
 
         let similarity = Workspace::calculate_similarity(&paths1, &paths2);
         assert_eq!(similarity, 1.0);
@@ -836,14 +1217,8 @@ mod tests {
 
     #[test]
     fn test_calculate_similarity_partial() {
-        let paths1 = vec![
-            PathBuf::from("/path/a"),
-            PathBuf::from("/path/b"),
-        ];
-        let paths2 = vec![
-            PathBuf::from("/path/a"),
-            PathBuf::from("/path/c"),
-        ];
+        let paths1 = vec![PathBuf::from("/path/a"), PathBuf::from("/path/b")];
+        let paths2 = vec![PathBuf::from("/path/a"), PathBuf::from("/path/c")];
 
         let similarity = Workspace::calculate_similarity(&paths1, &paths2);
         // 1 common out of 3 total = 1/3 ≈ 0.33
@@ -852,12 +1227,8 @@ mod tests {
 
     #[test]
     fn test_calculate_similarity_no_overlap() {
-        let paths1 = vec![
-            PathBuf::from("/path/a"),
-        ];
-        let paths2 = vec![
-            PathBuf::from("/path/b"),
-        ];
+        let paths1 = vec![PathBuf::from("/path/a")];
+        let paths2 = vec![PathBuf::from("/path/b")];
 
         let similarity = Workspace::calculate_similarity(&paths1, &paths2);
         assert_eq!(similarity, 0.0);
@@ -870,10 +1241,7 @@ mod tests {
             PathBuf::from("/path/b"),
             PathBuf::from("/path/c"),
         ];
-        let paths2 = vec![
-            PathBuf::from("/path/a"),
-            PathBuf::from("/path/b"),
-        ];
+        let paths2 = vec![PathBuf::from("/path/a"), PathBuf::from("/path/b")];
 
         let similarity = Workspace::calculate_similarity(&paths1, &paths2);
         // 2 common out of 3 total = 2/3 ≈ 0.67

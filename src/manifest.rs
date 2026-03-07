@@ -72,11 +72,10 @@ impl Manifest {
             return Ok(None);
         }
 
-        let content = fs::read_to_string(&manifest_path)
-            .context("Failed to read manifest file")?;
+        let content = fs::read_to_string(&manifest_path).context("Failed to read manifest file")?;
 
-        let manifest: Manifest = serde_json::from_str(&content)
-            .context("Failed to parse manifest file")?;
+        let manifest: Manifest =
+            serde_json::from_str(&content).context("Failed to parse manifest file")?;
 
         Ok(Some(manifest))
     }
@@ -86,14 +85,11 @@ impl Manifest {
         let manifest_path = pocket_dir.join(MANIFEST_FILE);
         let tmp_path = pocket_dir.join(MANIFEST_TMP);
 
-        let content = serde_json::to_string_pretty(self)
-            .context("Failed to serialize manifest")?;
+        let content = serde_json::to_string_pretty(self).context("Failed to serialize manifest")?;
 
-        fs::write(&tmp_path, &content)
-            .context("Failed to write manifest tmp file")?;
+        fs::write(&tmp_path, &content).context("Failed to write manifest tmp file")?;
 
-        fs::rename(&tmp_path, &manifest_path)
-            .context("Failed to rename manifest tmp to final")?;
+        fs::rename(&tmp_path, &manifest_path).context("Failed to rename manifest tmp to final")?;
 
         Ok(())
     }
@@ -285,7 +281,11 @@ mod tests {
         m.save(&tmp).unwrap();
 
         // Update with new paths
-        let new_paths = vec![PathBuf::from("/test/a"), PathBuf::from("/test/b"), PathBuf::from("/test/c")];
+        let new_paths = vec![
+            PathBuf::from("/test/a"),
+            PathBuf::from("/test/b"),
+            PathBuf::from("/test/c"),
+        ];
         m.update_paths(new_paths.clone(), &tmp).unwrap();
 
         // birth_hash should be set to original
@@ -323,7 +323,11 @@ mod tests {
         assert_eq!(m.birth_hash, Some("first_hash".to_string()));
 
         // Second update — birth_hash should NOT change
-        let paths3 = vec![PathBuf::from("/test/a"), PathBuf::from("/test/b"), PathBuf::from("/test/c")];
+        let paths3 = vec![
+            PathBuf::from("/test/a"),
+            PathBuf::from("/test/b"),
+            PathBuf::from("/test/c"),
+        ];
         m.update_paths(paths3, &tmp).unwrap();
         assert_eq!(m.birth_hash, Some("first_hash".to_string()));
         assert_eq!(m.augmented_from, Some(hash_after_first));

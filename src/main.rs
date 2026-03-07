@@ -32,7 +32,9 @@ fn run() -> Result<()> {
 
     // If no subcommand, we're creating/opening a workspace
     if cli.include.is_empty() {
-        return Err(anyhow!("No directories specified. Use -i/--include to add directories."));
+        return Err(anyhow!(
+            "No directories specified. Use -i/--include to add directories."
+        ));
     }
 
     handle_workspace(cli)
@@ -53,7 +55,8 @@ fn handle_command(command: Commands) -> Result<()> {
             let mut config = Config::load()?;
             config.register_alias(name.clone(), path.clone())?;
 
-            println!("{} {} -> {}",
+            println!(
+                "{} {} -> {}",
                 "Registered alias:".bright_green(),
                 name.bright_yellow(),
                 path.dimmed()
@@ -66,15 +69,13 @@ fn handle_command(command: Commands) -> Result<()> {
             let mut config = Config::load()?;
 
             if config.unregister_alias(&name)? {
-                println!("{} {}",
+                println!(
+                    "{} {}",
                     "Unregistered alias:".bright_green(),
                     name.bright_yellow()
                 );
             } else {
-                println!("{} {}",
-                    "Alias not found:".dimmed(),
-                    name.bright_yellow()
-                );
+                println!("{} {}", "Alias not found:".dimmed(), name.bright_yellow());
             }
 
             Ok(())
@@ -95,10 +96,7 @@ fn handle_command(command: Commands) -> Result<()> {
             aliases.sort_by_key(|(name, _)| *name);
 
             for (name, path) in aliases {
-                println!("  {} -> {}",
-                    name.bright_yellow(),
-                    path.bright_blue()
-                );
+                println!("  {} -> {}", name.bright_yellow(), path.bright_blue());
             }
 
             Ok(())
@@ -116,15 +114,14 @@ fn handle_command(command: Commands) -> Result<()> {
             println!();
 
             for workspace in workspaces {
-                println!("  {} {}",
+                println!(
+                    "  {} {}",
                     workspace.hash.bright_yellow(),
                     format!("({})", workspace.pocket_dir.display()).dimmed()
                 );
 
                 for path in &workspace.core_paths {
-                    println!("    - {}",
-                        path.display().to_string().bright_blue()
-                    );
+                    println!("    - {}", path.display().to_string().bright_blue());
                 }
 
                 println!();
@@ -133,18 +130,31 @@ fn handle_command(command: Commands) -> Result<()> {
             Ok(())
         }
 
-        Commands::Sync { pocket } => {
-            handle_sync(pocket)
-        }
+        Commands::Sync { pocket } => handle_sync(pocket),
 
-        Commands::Augment { add, remove, no_open } => {
-            handle_augment(add, remove, no_open)
-        }
+        Commands::Augment {
+            add,
+            remove,
+            no_open,
+        } => handle_augment(add, remove, no_open),
     }
 }
 
 fn handle_workspace(cli: Cli) -> Result<()> {
     let config = Config::load()?;
+
+    // Parse --use features (normalised to lowercase)
+    let use_beads = cli.use_features.iter().any(|f| f.to_lowercase() == "beads");
+
+    // Validate unknown --use values
+    for feature in &cli.use_features {
+        if feature.to_lowercase() != "beads" {
+            return Err(anyhow!(
+                "Unknown feature '{}'. Supported values: beads",
+                feature
+            ));
+        }
+    }
 
     // Resolve core paths
     let mut core_paths = Vec::new();
@@ -164,7 +174,10 @@ fn handle_workspace(cli: Cli) -> Result<()> {
         let resolved = config.resolve_path(path_str)?;
 
         if !resolved.exists() {
-            return Err(anyhow!("Sidecar path does not exist: {}", resolved.display()));
+            return Err(anyhow!(
+                "Sidecar path does not exist: {}",
+                resolved.display()
+            ));
         }
 
         sidecar_paths.push(resolved);
@@ -175,6 +188,11 @@ fn handle_workspace(cli: Cli) -> Result<()> {
         let source_path = config.resolve_path(&clone_from)?;
 
         let workspace = Workspace::clone_from(&source_path, &core_paths)?;
+
+        if use_beads {
+            workspace.setup_beads()?;
+        }
+
         workspace.open()?;
 
         return Ok(());
@@ -188,10 +206,16 @@ fn handle_workspace(cli: Cli) -> Result<()> {
         // Secondary lookup: check if any existing pocket's manifest matches these paths
         // (handles pockets that evolved in-place via sync/augment)
         if let Some(existing) = Workspace::find_workspace_by_manifest_paths(&core_paths)? {
-            println!("{} {} (matched by manifest)",
+            println!(
+                "{} {} (matched by manifest)",
                 "Found existing pocket:".bright_green(),
                 existing.hash.bright_yellow()
             );
+
+            if use_beads {
+                existing.setup_beads()?;
+            }
+
             existing.open()?;
             return Ok(());
         }
@@ -202,9 +226,7 @@ fn handle_workspace(cli: Cli) -> Result<()> {
         if !similar_workspaces.is_empty() {
             if let Some(selected) = Workspace::prompt_clone_selection(&similar_workspaces)? {
                 // Clone from selected workspace
-                println!("Cloning from: {}",
-                    selected.hash.bright_yellow()
-                );
+                println!("Cloning from: {}", selected.hash.bright_yellow());
 
                 // Copy safe pocket contents
                 if workspace.pocket_dir.exists() {
@@ -232,7 +254,8 @@ fn handle_workspace(cli: Cli) -> Result<()> {
                     let _ = parent_manifest.save(&selected.pocket_dir);
                 }
 
-                println!("{} {}",
+                println!(
+                    "{} {}",
                     "Cloned to:".bright_green(),
                     workspace.hash.bright_yellow()
                 );
@@ -245,9 +268,18 @@ fn handle_workspace(cli: Cli) -> Result<()> {
             workspace.create()?;
         }
 
+        if use_beads {
+            workspace.setup_beads()?;
+        }
+
         workspace.open()?;
     } else {
         println!("{}", "Using existing workspace".dimmed());
+
+        // Run beads setup regardless of whether the pocket is new — idempotent
+        if use_beads {
+            workspace.setup_beads()?;
+        }
 
         // Drift detection
         let drift_result = workspace.detect_and_resolve_drift()?;
@@ -261,7 +293,8 @@ fn handle_workspace(cli: Cli) -> Result<()> {
                     None => Manifest::new(workspace.hash.clone(), workspace.core_paths.clone()),
                 };
                 manifest.update_paths(new_core_paths, &workspace.pocket_dir)?;
-                println!("{} {}",
+                println!(
+                    "{} {}",
                     "Manifest updated in place:".bright_green(),
                     manifest.hash.bright_yellow()
                 );
@@ -349,12 +382,13 @@ fn handle_sync(pocket: String) -> Result<()> {
 
 fn handle_augment(add: Vec<String>, remove: Vec<String>, no_open: bool) -> Result<()> {
     if add.is_empty() && remove.is_empty() {
-        return Err(anyhow!("Nothing to do. Use --add or --remove to modify the workspace."));
+        return Err(anyhow!(
+            "Nothing to do. Use --add or --remove to modify the workspace."
+        ));
     }
 
     let config = Config::load()?;
-    let cwd = std::env::current_dir()
-        .context("Failed to get current working directory")?;
+    let cwd = std::env::current_dir().context("Failed to get current working directory")?;
 
     let workspace = Workspace::find_workspace_for_cwd(&cwd)?
         .ok_or_else(|| anyhow!(
@@ -362,7 +396,8 @@ fn handle_augment(add: Vec<String>, remove: Vec<String>, no_open: bool) -> Resul
             cwd.display()
         ))?;
 
-    println!("{} {}",
+    println!(
+        "{} {}",
         "Found workspace:".bright_white(),
         workspace.hash.bright_yellow()
     );
@@ -379,12 +414,14 @@ fn handle_augment(add: Vec<String>, remove: Vec<String>, no_open: bool) -> Resul
         }
 
         if new_paths.contains(&resolved) {
-            println!("  {} {} (already in workspace)",
+            println!(
+                "  {} {} (already in workspace)",
                 "Skipped:".dimmed(),
                 resolved.display().to_string().bright_blue()
             );
         } else {
-            println!("  {} {}",
+            println!(
+                "  {} {}",
                 "Adding:".bright_green(),
                 resolved.display().to_string().bright_blue()
             );
@@ -399,12 +436,14 @@ fn handle_augment(add: Vec<String>, remove: Vec<String>, no_open: bool) -> Resul
         new_paths.retain(|p| p != &resolved);
 
         if new_paths.len() < before_len {
-            println!("  {} {}",
+            println!(
+                "  {} {}",
                 "Removing:".bright_red(),
                 resolved.display().to_string().bright_blue()
             );
         } else {
-            println!("  {} {} (not in workspace)",
+            println!(
+                "  {} {} (not in workspace)",
                 "Skipped:".dimmed(),
                 resolved.display().to_string().bright_blue()
             );
@@ -413,7 +452,9 @@ fn handle_augment(add: Vec<String>, remove: Vec<String>, no_open: bool) -> Resul
 
     // Validate
     if new_paths.is_empty() {
-        return Err(anyhow!("Cannot remove all directories. At least one directory must remain."));
+        return Err(anyhow!(
+            "Cannot remove all directories. At least one directory must remain."
+        ));
     }
 
     // Check if anything actually changed
@@ -451,7 +492,8 @@ fn handle_augment(add: Vec<String>, remove: Vec<String>, no_open: bool) -> Resul
     };
     manifest.update_paths(new_paths, &workspace.pocket_dir)?;
 
-    println!("{} {} (pocket dir unchanged)",
+    println!(
+        "{} {} (pocket dir unchanged)",
         "Workspace updated in place:".bright_green(),
         manifest.hash.bright_yellow()
     );
@@ -459,7 +501,11 @@ fn handle_augment(add: Vec<String>, remove: Vec<String>, no_open: bool) -> Resul
     if !no_open {
         updated_workspace.open()?;
     } else {
-        println!("  {} {}", "Location:".dimmed(), workspace.pocket_dir.display().to_string().bright_blue());
+        println!(
+            "  {} {}",
+            "Location:".dimmed(),
+            workspace.pocket_dir.display().to_string().bright_blue()
+        );
     }
 
     Ok(())
