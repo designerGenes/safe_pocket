@@ -50,11 +50,21 @@ impl Workspace {
     pub fn spocket_dir() -> Result<PathBuf> {
         let home = dirs::home_dir().context("Failed to get home directory")?;
 
-        let spocket_dir = home.join(".spocket");
+        let canonical = home.join(".safe_pocket");
+        let legacy = home.join(".spocket");
 
-        fs::create_dir_all(&spocket_dir).context("Failed to create .spocket directory")?;
+        // Use ~/.safe_pocket as the canonical location. If it doesn't exist yet
+        // but the legacy ~/.spocket does, use the legacy dir so existing pockets
+        // keep working without any migration step.
+        let dir = if !canonical.exists() && legacy.exists() {
+            legacy
+        } else {
+            canonical
+        };
 
-        Ok(spocket_dir)
+        fs::create_dir_all(&dir).context("Failed to create safe pocket storage directory")?;
+
+        Ok(dir)
     }
 
     /// Find the .code-workspace file in a pocket directory.
@@ -171,340 +181,133 @@ impl Workspace {
     fn create_pocket_structure(&self) -> Result<()> {
         fs::create_dir_all(&self.pocket_dir).context("Failed to create pocket directory")?;
 
-        let pocket_dir_str = self.pocket_dir.to_string_lossy();
-
-        // Build a formatted list of core paths for use in templates
-        let core_paths_list = self
-            .core_paths
-            .iter()
-            .map(|p| format!("- {}", p.display()))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        // Primary project path (first core path) used in templates
         let primary_project_path = self
             .core_paths
             .first()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "<project path>".to_string());
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("<project path>"));
 
-        // ── Root README.md ────────────────────────────────────────────────────
+        let ctx = crate::template::TemplateContext {
+            spocket_root: self.pocket_dir.clone(),
+            project_root: primary_project_path.clone(),
+            spocket_name: self.hash.clone(),
+        };
+
+        // Apply templates (non-interactive for new pockets — no overwrite prompts)
+        crate::template::apply_templates(
+            &self.pocket_dir,
+            &ctx,
+            Some(&primary_project_path),
+            false, // non-interactive
+        )?;
+
+        // ── Files not covered by templates ────────────────────────────────────
+        // These are structural files that aren't meaningful as user-editable
+        // templates but are still needed in every pocket.
+
+        // Root README.md
         if self.create_readmes {
             let readme = self.pocket_dir.join("README.md");
-            fs::write(
-                &readme,
-                format!(
-                    "# Safe Pocket: {hash}\n\n\
-                    This is a Safe Pocket workspace directory. It contains:\n\n\
-                    - `.github/copilot-instructions.md` - Custom AI copilot instructions\n\
-                    - `.github/prompts/` - Reusable prompt templates\n\
-                    - `FEATURES/` - Feature ideas and documentation\n\
-                    - `observations/` - AI-generated insights and learnings\n\n\
-                    ## Usage\n\n\
-                    This directory is automatically managed by spocket. Edit the files above to customize \
-                    your AI assistant's behavior for the workspace directories:\n\n\
-                    {paths}\n\n\
-                    Learn more: https://github.com/your-repo/safe_pocket\n",
-                    hash = self.hash,
-                    paths = core_paths_list,
-                ),
-            )
-            .context("Failed to create README.md")?;
+            if !readme.exists() {
+                let core_paths_list = self
+                    .core_paths
+                    .iter()
+                    .map(|p| format!("- {}", p.display()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                fs::write(
+                    &readme,
+                    format!(
+                        "# Safe Pocket: {hash}\n\n\
+                        This is a Safe Pocket workspace directory. It contains:\n\n\
+                        - `.github/copilot-instructions.md` - Custom AI copilot instructions\n\
+                        - `.github/prompts/` - Reusable prompt templates\n\
+                        - `FEATURES/` - Feature ideas and documentation\n\
+                        - `observations/` - AI-generated insights and learnings\n\n\
+                        ## Usage\n\n\
+                        This directory is automatically managed by spocket. Edit the files above to customize \
+                        your AI assistant's behavior for the workspace directories:\n\n\
+                        {paths}\n\n\
+                        Learn more: https://github.com/your-repo/safe_pocket\n",
+                        hash = self.hash,
+                        paths = core_paths_list,
+                    ),
+                )
+                .context("Failed to create README.md")?;
+            }
         }
-
-        // ── .github/ subdirectories ───────────────────────────────────────────
-        let github_dir = self.pocket_dir.join(".github");
-        let github_prompts = github_dir.join("prompts");
-        let github_agents = github_dir.join("agents");
-        let github_skills = github_dir.join("skills");
-
-        fs::create_dir_all(&github_prompts)
-            .context("Failed to create .github/prompts directory")?;
-        fs::create_dir_all(&github_agents).context("Failed to create .github/agents directory")?;
-        fs::create_dir_all(&github_skills).context("Failed to create .github/skills directory")?;
 
         // .github/prompts/README.md
         if self.create_readmes {
-            let prompts_readme = github_prompts.join("README.md");
-            fs::write(
-                &prompts_readme,
-                "# Prompts Directory\n\n\
-                Store reusable prompt templates here.\n\n\
-                ## Example\n\n\
-                Create a file like `code-review.md` with a prompt template:\n\n\
-                ```\n\
-                Please review this code for:\n\
-                - Security vulnerabilities\n\
-                - Performance issues\n\
-                - Code style consistency\n\
-                ```\n\n\
-                Then reference it in your copilot conversations.\n",
-            )
-            .context("Failed to create prompts README.md")?;
+            let prompts_readme = self
+                .pocket_dir
+                .join(".github")
+                .join("prompts")
+                .join("README.md");
+            if !prompts_readme.exists() {
+                if let Some(parent) = prompts_readme.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(
+                    &prompts_readme,
+                    "# Prompts Directory\n\n\
+                    Store reusable prompt templates here.\n\n\
+                    ## Example\n\n\
+                    Create a file like `code-review.md` with a prompt template:\n\n\
+                    ```\n\
+                    Please review this code for:\n\
+                    - Security vulnerabilities\n\
+                    - Performance issues\n\
+                    - Code style consistency\n\
+                    ```\n\n\
+                    Then reference it in your copilot conversations.\n",
+                )
+                .context("Failed to create prompts README.md")?;
+            }
         }
 
-        // .github/copilot-instructions.md — rich templated content
-        let copilot_instructions = github_dir.join("copilot-instructions.md");
-        fs::write(
-            &copilot_instructions,
-            format!(
-                "# Project folder versus safe pocket folder\n\n\
-                This file is contained inside a subdirectory of\n\
-                {pocket_dir}\n\n\
-                That folder is a \"safe pocket\" folder. It is NOT the \"project folder\". \
-                The safe pocket folder contains \"meta files\" which are relevant only to the \
-                actual project folder. The actual project folder is\n\
-                {project_path}\n\n\
-                All commands made to the agent are intended to be applied to the project folder, \
-                not the safe pocket folder. The safe pocket folder is only for storing meta files \
-                that are relevant to the project folder. The agent should never make any changes \
-                to the safe pocket folder, only read from it.\n\n\
-                For example, if the agent is asked to review our codebase, it should read the code \
-                files from the project folder, not the safe pocket folder. The safe pocket folder \
-                may contain instructions or other meta files that are relevant to the project folder, \
-                but the actual code files are in the project folder.\n\n\
-                # Rules\n\n\
-                1. You must always use full paths whenever you reference any file or directory. \
-                NEVER use relative paths.\n\
-                2. If instructed to use a \"cli app\" or \"terminal command\", you should run this \
-                command in the context of the project folder, not the safe pocket folder. You should \
-                also always try to run the literal command you are told to use, before searching for \
-                python files or source code. For example, if I tell you \"use the cli app sponge_bob \
-                to do X\", you must first attempt to run the command \"sponge_bob\" in the terminal, \
-                and only if that fails should you search for a python file or source code that might \
-                be relevant.\n\
-                3. All python dependencies and environments are managed by 'uv', never by 'pip'.\n\n\
-                # Observations Logging\n\n\
-                As you work, you will inevitably discover significant insights about the project, \
-                codebase, patterns, bugs, conventions, and other noteworthy findings. You are \
-                required to actively log these as \"observation\" files in the safe pocket folder.\n\n\
-                ## What qualifies as an Observation\n\n\
-                Log an observation whenever you discover any of the following:\n\
-                - Architectural patterns or design decisions in the codebase\n\
-                - Recurring bugs, anti-patterns, or footguns\n\
-                - Non-obvious conventions or project-specific idioms\n\
-                - Important constraints (e.g., dependency quirks, environment limitations)\n\
-                - Useful techniques or shortcuts specific to this project\n\
-                - Surprising or counter-intuitive behavior you encounter\n\
-                - Decisions made during a session that future sessions should know about\n\n\
-                When in doubt, log it. Observations are cheap to create and valuable to retain.\n\n\
-                ## Where to write Observations\n\n\
-                Always write observation files to:\n\
-                ```\n\
-                {pocket_dir}/observations/\n\
-                ```\n\n\
-                This is the safe pocket folder — writing here is explicitly permitted for observation logging.\n\n\
-                ## Naming Convention\n\n\
-                Name each file using the following format:\n\
-                ```\n\
-                YYYY-MM-DD--<slug>.md\n\
-                ```\n\n\
-                Where `<slug>` is a short, lowercase, hyphen-separated summary of the observation's \
-                subject derived from its content. The slug should be specific enough to be meaningful \
-                at a glance.\n\n\
-                Examples:\n\
-                - `2025-06-10--uv-env-not-activated-by-default.md`\n\
-                - `2025-06-10--project-uses-ruff-not-black.md`\n\
-                - `2025-06-11--api-auth-token-stored-in-dotenv.md`\n\n\
-                Do NOT use generic slugs like `observation-1` or `misc-finding`.\n\n\
-                ## File Format\n\n\
-                Each observation file should be a short Markdown file with the following structure:\n\n\
-                ```markdown\n\
-                # <Title of Observation>\n\n\
-                **Date:** YYYY-MM-DD  \n\
-                **Context:** <Brief description of what you were doing when you made this observation>\n\n\
-                ## Finding\n\n\
-                <Clear, concise description of what you observed.>\n\n\
-                ## Why It Matters\n\n\
-                <Why this is worth knowing for future sessions or contributors.>\n\n\
-                ## Notes\n\n\
-                <Any additional details, caveats, or related links. Omit if not needed.>\n\
-                ```\n\n\
-                Keep observations focused. One observation per file. Split large findings into \
-                multiple files if needed.\n",
-                pocket_dir = pocket_dir_str,
-                project_path = primary_project_path,
-            ),
-        )
-        .context("Failed to create copilot-instructions.md")?;
-
-        // ── AGENTS.md (root) ──────────────────────────────────────────────────
-        let agents_md = self.pocket_dir.join("AGENTS.md");
-        // Build the project layout table rows
-        let layout_rows = self
-            .core_paths
-            .iter()
-            .enumerate()
-            .map(|(i, p)| {
-                let label = if i == 0 {
-                    "**Project folder** — all source code lives here"
-                } else {
-                    "**Additional project folder**"
-                };
-                format!("| `{}` | {} |", p.display(), label)
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        fs::write(
-            &agents_md,
-            format!(
-                "# Agent Instructions\n\n\
-                ## Project Layout\n\n\
-                | Path | Purpose |\n\
-                |------|---------|\n\
-                {layout_rows}\n\
-                | `{pocket_dir}` | **Safe pocket** — meta/config files only (read-only) |\n\n\
-                All agent work targets the **project folder**. Never modify the safe pocket folder.\n\n\
-                > **Beads database location:** The `.beads/` database lives in the **safe pocket**, not the project folder.\n\
-                > A stub `.beads/redirect` file in the project folder points `bd` to the correct location automatically.\n\
-                > Run all `bd` commands from the project folder — they will resolve correctly via the redirect.\n\n\
-                ## Absolute Rules\n\n\
-                1. **Always use full absolute paths.** Never use relative paths in any file reference or command.\n\
-                2. **Run CLI commands in the project folder context.** If told to use a CLI tool (e.g. `some_tool`), \
-                run it literally first; only search source code if the command fails.\n\
-                3. **Python dependencies use `uv`, never `pip`.** Install packages with `uv add <pkg>`, \
-                run scripts with `uv run <script>`.\n\n\
-                ---\n\n\
-                ## Build / Lint / Test Commands\n\n\
-                > No source code exists yet. Add commands here as the project grows.\n\n\
-                **Python (when applicable):**\n\
-                ```bash\n\
-                uv run pytest                        # Run all tests\n\
-                uv run pytest tests/test_foo.py      # Run a single test file\n\
-                uv run pytest tests/test_foo.py::test_bar  # Run a single test\n\
-                uv run ruff check .                  # Lint\n\
-                uv run ruff format .                 # Format\n\
-                uv run mypy .                        # Type check\n\
-                ```\n\n\
-                **General:**\n\
-                ```bash\n\
-                uv sync                              # Install/sync dependencies\n\
-                uv run pre-commit run --all-files    # Run all pre-commit hooks\n\
-                ```\n\n\
-                ---\n\n\
-                ## Code Style Guidelines\n\n\
-                - **Language**: Prefer Python unless another language is clearly appropriate.\n\
-                - **Formatting**: Use `ruff format` (88-char line length). Never hand-format what a tool can do.\n\
-                - **Linting**: `ruff check` with auto-fix (`--fix`) where safe.\n\
-                - **Types**: Annotate all function signatures. Use `mypy` for type checking.\n\
-                - **Naming**: `snake_case` for functions/variables, `PascalCase` for classes, `UPPER_SNAKE` for constants.\n\
-                - **Imports**: stdlib → third-party → local, separated by blank lines. Absolute imports only.\n\
-                - **Error handling**: Raise specific exceptions; never bare `except:`. Log at the call site or let it propagate — not both.\n\
-                - **Docstrings**: Google-style for public functions/classes.\n\n\
-                ---\n\n\
-                ## Issue Tracking with bd (beads)\n\n\
-                **IMPORTANT**: Use **bd** for ALL task tracking. Do NOT use markdown TODOs or external trackers.\n\n\
-                **Quick Reference:**\n\
-                ```bash\n\
-                bd ready                              # Find available (unblocked) work\n\
-                bd ready --json                       # Machine-readable output\n\
-                bd show <id>                          # View issue details\n\
-                bd update <id> --claim --json         # Claim work atomically\n\
-                bd close <id> --reason \"Done\" --json  # Complete work\n\
-                bd sync                               # Sync with git\n\
-                ```\n\n\
-                **Create issues:**\n\
-                ```bash\n\
-                bd create \"Title\" --description=\"Context\" -t bug|feature|task|epic|chore -p 0-4 --json\n\
-                bd create \"Found bug\" --description=\"Details\" -p 1 --deps discovered-from:<parent-id> --json\n\
-                ```\n\n\
-                ### Issue Types\n\
-                - `bug` — Something broken\n\
-                - `feature` — New functionality\n\
-                - `task` — Tests, docs, refactoring\n\
-                - `epic` — Large feature with subtasks\n\
-                - `chore` — Maintenance (deps, tooling)\n\n\
-                ### Priorities\n\
-                - `0` — Critical (security, data loss, broken builds)\n\
-                - `1` — High (major features, important bugs)\n\
-                - `2` — Medium (default)\n\
-                - `3` — Low (polish, optimization)\n\
-                - `4` — Backlog (future ideas)\n\n\
-                ### Workflow\n\
-                1. `bd ready` — find unblocked issues\n\
-                2. `bd update <id> --claim` — claim atomically\n\
-                3. Implement, test, document\n\
-                4. Discovered new work? `bd create \"...\" --deps discovered-from:<id>`\n\
-                5. `bd close <id> --reason \"Done\"`\n\n\
-                ### Rules\n\
-                - Always use `--json` for programmatic/agent use\n\
-                - Link discovered work with `discovered-from` dependencies\n\
-                - Auto-sync: `.beads/issues.jsonl` exports after changes (5s debounce)\n\
-                - Never create markdown TODO lists or duplicate tracking systems\n\n\
-                ---\n\n\
-                ## Non-Interactive Shell Commands\n\n\
-                Shell aliases may add `-i` (interactive) flags, causing agents to hang. Always force non-interactive:\n\n\
-                ```bash\n\
-                cp -f source dest          # NOT: cp source dest\n\
-                mv -f source dest          # NOT: mv source dest\n\
-                rm -f file                 # NOT: rm file\n\
-                rm -rf directory           # NOT: rm -r directory\n\
-                cp -rf source dest         # NOT: cp -r source dest\n\
-                ```\n\n\
-                Other commands:\n\
-                - `git log` / `git diff` — add `--no-pager`\n\
-                - `git commit` — always `-m \"msg\"`, never bare\n\
-                - `apt-get` — use `-y`\n\
-                - `brew` — set `HOMEBREW_NO_AUTO_UPDATE=1`\n\n\
-                ---\n\n\
-                ## Landing the Plane (Session Completion)\n\n\
-                Work is **NOT complete** until `git push` succeeds. Complete ALL steps:\n\n\
-                1. **File issues** for any remaining or follow-up work\n\
-                2. **Run quality gates** (tests, lint, type check) if code changed\n\
-                3. **Update issue status** — close finished, update in-progress\n\
-                4. **Push to remote:**\n\
-                   ```bash\n\
-                   git pull --rebase\n\
-                   bd sync\n\
-                   git push\n\
-                   git status   # Must show \"up to date with origin\"\n\
-                   ```\n\
-                5. **Verify** — all changes committed AND pushed\n\
-                6. **Hand off** — summarize context for next session\n\n\
-                **NEVER** stop before pushing. **NEVER** say \"ready to push when you are\" — YOU must push.\n",
-                layout_rows = layout_rows,
-                pocket_dir = pocket_dir_str,
-            ),
-        )
-        .context("Failed to create AGENTS.md")?;
-
-        // ── .env (empty) ──────────────────────────────────────────────────────
+        // .env (empty)
         let env_file = self.pocket_dir.join(".env");
-        fs::write(&env_file, "").context("Failed to create .env")?;
+        if !env_file.exists() {
+            fs::write(&env_file, "").context("Failed to create .env")?;
+        }
 
-        // ── FEATURES/00.md ────────────────────────────────────────────────────
+        // FEATURES/00.md
         let features_dir = self.pocket_dir.join("FEATURES");
         fs::create_dir_all(&features_dir).context("Failed to create FEATURES directory")?;
-
         let features_file = features_dir.join("00.md");
-        fs::write(
-            &features_file,
-            "# Features\n\nAdd your feature ideas and documentation here.\n",
-        )
-        .context("Failed to create FEATURES/00.md")?;
+        if !features_file.exists() {
+            fs::write(
+                &features_file,
+                "# Features\n\nAdd your feature ideas and documentation here.\n",
+            )
+            .context("Failed to create FEATURES/00.md")?;
+        }
 
-        // ── observations/ ─────────────────────────────────────────────────────
+        // observations/ directory
         let observations_dir = self.pocket_dir.join("observations");
         fs::create_dir_all(&observations_dir).context("Failed to create observations directory")?;
 
         if self.create_readmes {
             let observations_readme = observations_dir.join("README.md");
-            fs::write(
-                &observations_readme,
-                "# Observations Directory\n\n\
-                This directory is for AI-generated insights and learnings discovered during your work.\n\n\
-                ## Purpose\n\n\
-                As you work with your AI copilot, it may discover:\n\
-                - Common patterns in your codebase\n\
-                - Recurring issues or bugs\n\
-                - Useful shortcuts or techniques\n\
-                - Project-specific conventions\n\n\
-                Document these observations here so they can inform future sessions.\n\n\
-                ## Format\n\n\
-                Create dated files like `2024-01-15-auth-patterns.md` with your findings.\n"
-            )
-            .context("Failed to create observations README.md")?;
+            if !observations_readme.exists() {
+                fs::write(
+                    &observations_readme,
+                    "# Observations Directory\n\n\
+                    This directory is for AI-generated insights and learnings discovered during your work.\n\n\
+                    ## Purpose\n\n\
+                    As you work with your AI copilot, it may discover:\n\
+                    - Common patterns in your codebase\n\
+                    - Recurring issues or bugs\n\
+                    - Useful shortcuts or techniques\n\
+                    - Project-specific conventions\n\n\
+                    Document these observations here so they can inform future sessions.\n\n\
+                    ## Format\n\n\
+                    Create dated files like `2024-01-15-auth-patterns.md` with your findings.\n"
+                )
+                .context("Failed to create observations README.md")?;
+            }
         }
 
         Ok(())
@@ -891,7 +694,8 @@ impl Workspace {
     pub fn find_workspace_containing(path: &Path) -> Result<Option<Self>> {
         let spocket_dir = Self::spocket_dir()?;
 
-        let entries = fs::read_dir(&spocket_dir).context("Failed to read .spocket directory")?;
+        let entries =
+            fs::read_dir(&spocket_dir).context("Failed to read safe pocket storage directory")?;
 
         for entry in entries {
             let entry = entry?;
@@ -935,7 +739,7 @@ impl Workspace {
     pub fn find_workspace_for_cwd(cwd: &Path) -> Result<Option<Self>> {
         let spocket_dir = Self::spocket_dir()?;
 
-        // Check 1: Is CWD inside a ~/.spocket/<hash>/ directory?
+        // Check 1: Is CWD inside a ~/.safe_pocket/<hash>/ directory?
         if cwd.starts_with(&spocket_dir) {
             if let Ok(relative) = cwd.strip_prefix(&spocket_dir) {
                 if let Some(hash_component) = relative.components().next() {
@@ -956,7 +760,8 @@ impl Workspace {
         }
 
         // Check 2: Is CWD inside (or equal to) any workspace's core_paths?
-        let entries = fs::read_dir(&spocket_dir).context("Failed to read .spocket directory")?;
+        let entries =
+            fs::read_dir(&spocket_dir).context("Failed to read safe pocket storage directory")?;
 
         for entry in entries {
             let entry = entry?;
@@ -1000,7 +805,8 @@ impl Workspace {
         let target_hash = hash_paths(target_paths);
         let spocket_dir = Self::spocket_dir()?;
 
-        let entries = fs::read_dir(&spocket_dir).context("Failed to read .spocket directory")?;
+        let entries =
+            fs::read_dir(&spocket_dir).context("Failed to read safe pocket storage directory")?;
 
         for entry in entries {
             let entry = entry?;
@@ -1040,7 +846,8 @@ impl Workspace {
 
         let mut workspaces = Vec::new();
 
-        let entries = fs::read_dir(&spocket_dir).context("Failed to read .spocket directory")?;
+        let entries =
+            fs::read_dir(&spocket_dir).context("Failed to read safe pocket storage directory")?;
 
         for entry in entries {
             let entry = entry?;

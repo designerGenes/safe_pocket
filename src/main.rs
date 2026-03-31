@@ -2,12 +2,15 @@ mod cli;
 mod config;
 mod hash;
 mod manifest;
+mod template;
 mod workspace;
 
 use anyhow::{anyhow, Context, Result};
-use clap::Parser;
+use clap::{CommandFactory, Parser};
+use clap_complete::generate;
 use colored::Colorize;
 use std::fs;
+use std::io;
 use std::path::PathBuf;
 
 use cli::{Cli, Commands};
@@ -25,9 +28,19 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
 
+    // Ensure default template assets exist in the user's config directory.
+    // This is a no-op after the first run (only writes files that don't exist).
+    // Silently ignore errors here so a broken config dir doesn't block normal use.
+    let _ = template::ensure_default_assets();
+
     // Handle subcommands first
     if let Some(command) = cli.command {
         return handle_command(command);
+    }
+
+    // Handle upgrade (-u)
+    if let Some(upgrade_path) = cli.upgrade {
+        return handle_upgrade(upgrade_path);
     }
 
     // If no subcommand, we're creating/opening a workspace
@@ -137,6 +150,13 @@ fn handle_command(command: Commands) -> Result<()> {
             remove,
             no_open,
         } => handle_augment(add, remove, no_open),
+
+        Commands::Completions { shell } => {
+            let mut cmd = Cli::command();
+            let shell: clap_complete::Shell = shell.into();
+            generate(shell, &mut cmd, "spocket", &mut io::stdout());
+            Ok(())
+        }
     }
 }
 
@@ -509,6 +529,38 @@ fn handle_augment(add: Vec<String>, remove: Vec<String>, no_open: bool) -> Resul
     }
 
     Ok(())
+}
+
+fn handle_upgrade(path: String) -> Result<()> {
+    let config = Config::load()?;
+    let resolved = config.resolve_path(&path)?;
+
+    // The path might be:
+    // 1. A pocket directory directly (e.g. ~/.safe_pocket/abc123)
+    // 2. A project directory that has an associated pocket
+    let spocket_dir = Workspace::spocket_dir()?;
+
+    let pocket_dir = if resolved.starts_with(&spocket_dir) && resolved.is_dir() {
+        // Direct pocket path
+        resolved
+    } else {
+        // Try to find the pocket for this project path
+        let workspace = Workspace::find_workspace_containing(&resolved)?
+            .or_else(|| {
+                // Also try find_workspace_for_cwd
+                Workspace::find_workspace_for_cwd(&resolved).ok().flatten()
+            })
+            .ok_or_else(|| {
+                anyhow!(
+                    "No safe pocket found for path: {}\n\
+                     Provide either a pocket directory or a project directory with an existing pocket.",
+                    resolved.display()
+                )
+            })?;
+        workspace.pocket_dir
+    };
+
+    template::upgrade_pocket(&pocket_dir)
 }
 
 // Helper function to copy directory contents

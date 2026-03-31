@@ -2,9 +2,21 @@
 name = "spocket"
 version = "0.2.0"
 edition = "2021"
+description = "Safe Pocket — ad hoc VS Code workspace manager with AI copilot support"
+license = "MIT"
+repository = "https://github.com/jadennation/safe_pocket"
+homepage = "https://github.com/jadennation/safe_pocket"
+keywords = ["vscode", "workspace", "ai", "copilot", "productivity"]
+categories = ["command-line-utilities", "development-tools"]
+readme = "README.md"
+
+[[bin]]
+name = "spocket"
+path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
+clap_complete = "4.5"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
