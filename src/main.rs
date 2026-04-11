@@ -178,6 +178,35 @@ fn handle_command(command: Commands) -> Result<()> {
     }
 }
 
+fn find_existing_workspace_for_paths(paths: &[PathBuf]) -> Result<Option<Workspace>> {
+    let spocket_dir = Workspace::spocket_dir()?;
+
+    for path in paths {
+        if path.starts_with(&spocket_dir) {
+            let relative = path.strip_prefix(&spocket_dir).unwrap();
+            if let Some(hash_component) = relative.components().next() {
+                let hash = hash_component.as_os_str().to_string_lossy().to_string();
+                let pocket_dir = spocket_dir.join(&hash);
+                if let Some((_, core_paths)) = Workspace::load_manifest_or_backfill(&pocket_dir)? {
+                    return Ok(Some(Workspace {
+                        hash,
+                        core_paths,
+                        sidecar_paths: vec![],
+                        pocket_dir,
+                        create_readmes: false,
+                    }));
+                }
+            }
+        }
+
+        if let Some(ws) = Workspace::find_workspace_containing(path)? {
+            return Ok(Some(ws));
+        }
+    }
+
+    Ok(None)
+}
+
 fn handle_workspace(cli: Cli) -> Result<()> {
     let config = Config::load()?;
 
@@ -234,6 +263,25 @@ fn handle_workspace(cli: Cli) -> Result<()> {
         open_with_merge(&workspace)?;
 
         return Ok(());
+    }
+
+    if !cli.force_new {
+        if let Some(existing) = find_existing_workspace_for_paths(&core_paths)? {
+            println!(
+                "{} {}",
+                "Opening existing workspace:".bright_green(),
+                existing.hash.bright_yellow()
+            );
+
+            existing.migrate_storage_references()?;
+
+            if use_beads {
+                existing.setup_beads()?;
+            }
+
+            open_with_merge(&existing)?;
+            return Ok(());
+        }
     }
 
     // Create or open workspace

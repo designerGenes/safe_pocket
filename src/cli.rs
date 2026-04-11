@@ -110,6 +110,17 @@ pub struct Cli {
     #[arg(short = 'u', long = "upgrade", value_name = "PATH")]
     pub upgrade: Option<String>,
 
+    /// Force creation of a new workspace even if one already exists
+    ///
+    /// By default, if `spocket -i .` detects that the current directory (or any
+    /// included path) already belongs to an existing safe pocket, it opens that
+    /// pocket instead of creating a duplicate.  Pass `--new` to override this
+    /// behaviour and always create a fresh workspace.
+    ///
+    ///   spocket -i . --new
+    #[arg(long = "new")]
+    pub force_new: bool,
+
     /// Enable verbose output
     ///
     /// Shows informational messages that are hidden by default, such as runtime
