@@ -145,6 +145,10 @@ fn handle_command(command: Commands) -> Result<()> {
 
         Commands::Sync { pocket } => handle_sync(pocket),
 
+        Commands::MergeStart { pocket } => handle_merge_start(pocket),
+
+        Commands::MergeStop { pocket } => handle_merge_stop(pocket),
+
         Commands::Augment {
             add,
             remove,
@@ -213,7 +217,7 @@ fn handle_workspace(cli: Cli) -> Result<()> {
             workspace.setup_beads()?;
         }
 
-        workspace.open()?;
+        open_with_merge(&workspace)?;
 
         return Ok(());
     }
@@ -236,7 +240,7 @@ fn handle_workspace(cli: Cli) -> Result<()> {
                 existing.setup_beads()?;
             }
 
-            existing.open()?;
+            open_with_merge(&existing)?;
             return Ok(());
         }
 
@@ -292,7 +296,7 @@ fn handle_workspace(cli: Cli) -> Result<()> {
             workspace.setup_beads()?;
         }
 
-        workspace.open()?;
+        open_with_merge(&workspace)?;
     } else {
         println!("{}", "Using existing workspace".dimmed());
 
@@ -306,8 +310,6 @@ fn handle_workspace(cli: Cli) -> Result<()> {
 
         match drift_result {
             DriftResult::AcceptFile { new_core_paths } => {
-                // In-place update: just update the manifest. The workspace file
-                // already has the new paths (the user edited it). The pocket dir stays put.
                 let mut manifest = match Manifest::load(&workspace.pocket_dir)? {
                     Some(m) => m,
                     None => Manifest::new(workspace.hash.clone(), workspace.core_paths.clone()),
@@ -318,10 +320,10 @@ fn handle_workspace(cli: Cli) -> Result<()> {
                     "Manifest updated in place:".bright_green(),
                     manifest.hash.bright_yellow()
                 );
-                workspace.open()?;
+                open_with_merge(&workspace)?;
             }
             _ => {
-                workspace.open()?;
+                open_with_merge(&workspace)?;
             }
         }
     }
@@ -519,12 +521,103 @@ fn handle_augment(add: Vec<String>, remove: Vec<String>, no_open: bool) -> Resul
     );
 
     if !no_open {
-        updated_workspace.open()?;
+        open_with_merge(&updated_workspace)?;
     } else {
         println!(
             "  {} {}",
             "Location:".dimmed(),
             workspace.pocket_dir.display().to_string().bright_blue()
+        );
+    }
+
+    Ok(())
+}
+
+fn open_with_merge(ws: &Workspace) -> Result<()> {
+    if let Ok(ctx) = build_template_context(&ws.pocket_dir) {
+        if let Err(e) = template::apply_merge_at_runtime(&ws.pocket_dir, &ctx) {
+            eprintln!(
+                "{} {}",
+                "Warning: merge-at-runtime failed:".bright_yellow(),
+                e
+            );
+        }
+    }
+    ws.open()
+}
+
+fn build_template_context(pocket_dir: &std::path::Path) -> Result<template::TemplateContext> {
+    let manifest = Manifest::load(pocket_dir)?
+        .ok_or_else(|| anyhow!("No manifest found in pocket: {}", pocket_dir.display()))?;
+
+    let project_root = manifest
+        .core_paths
+        .first()
+        .cloned()
+        .unwrap_or_else(|| PathBuf::from("<unknown>"));
+
+    let spocket_name = pocket_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_string();
+
+    let global_obs = template::global_observations_dir().unwrap_or_else(|_| {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("/"))
+            .join(".config")
+            .join("safe_pocket")
+            .join("observations")
+    });
+
+    Ok(template::TemplateContext {
+        spocket_root: pocket_dir.to_path_buf(),
+        project_root,
+        spocket_name,
+        global_observations_path: global_obs,
+    })
+}
+
+fn handle_merge_start(pocket: String) -> Result<()> {
+    let pocket_dir = PathBuf::from(&pocket);
+
+    if !pocket_dir.is_dir() {
+        return Err(anyhow!("Pocket directory does not exist: {}", pocket));
+    }
+
+    let ctx = build_template_context(&pocket_dir)?;
+    let count = template::apply_merge_at_runtime(&pocket_dir, &ctx)?;
+
+    if count == 0 {
+        println!("{}", "No runtime merge templates found.".dimmed());
+    } else {
+        println!(
+            "{} {} file(s) runtime-merged.",
+            "Merge-start complete:".bright_green(),
+            count.to_string().bright_yellow()
+        );
+    }
+
+    Ok(())
+}
+
+fn handle_merge_stop(pocket: String) -> Result<()> {
+    let pocket_dir = PathBuf::from(&pocket);
+
+    if !pocket_dir.is_dir() {
+        return Err(anyhow!("Pocket directory does not exist: {}", pocket));
+    }
+
+    let ctx = build_template_context(&pocket_dir)?;
+    let count = template::strip_merge_at_runtime(&pocket_dir, &ctx)?;
+
+    if count == 0 {
+        println!("{}", "No runtime content to strip.".dimmed());
+    } else {
+        println!(
+            "{} {} file(s) cleaned.",
+            "Merge-stop complete:".bright_green(),
+            count.to_string().bright_yellow()
         );
     }
 

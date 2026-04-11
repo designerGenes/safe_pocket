@@ -1,4 +1,6 @@
 #SPOCKET_TEMPLATE_DESTINATION: .github/copilot-instructions.md
+#SPOCKET_MERGE_AT_RUNTIME
+
 # Project folder versus safe pocket folder
 
 This file is contained inside a subdirectory of
@@ -16,6 +18,10 @@ For example, if the agent is asked to review our codebase, it should read the co
 1. You must always use full paths whenever you reference any file or directory. NEVER use relative paths.
 2. If instructed to use a "cli app" or "terminal command", you should run this command in the context of the project folder, not the safe pocket folder. You should also always try to run the literal command you are told to use, before searching for python files or source code. For example, if I tell you "use the cli app sponge_bob to do X", you must first attempt to run the command "sponge_bob" in the terminal, and only if that fails should you search for a python file or source code that might be relevant.
 3. All python dependencies and environments are managed by 'uv', never by 'pip'.
+
+# Global Observations
+
+Some applications will be frequently interacted with.  Rather than having every project that needs Copilot to interact with those apps learn about the apps each time, we can have a global set of observations that are shared across all safe pockets.  Whenever you intend to interact with an app, first check inside the global observations folder for a directory named like {{GLOBAL_OBSERVATIONS_PATH}}/name_of_app, to see if there are any relevant observations about the app from previous sessions.  If there are, you can use those observations to inform your interactions with the app.  If there aren't, you can create new observations based on your interactions with the app and save them to the global observations folder for future use.
 
 # Observations Logging
 
@@ -83,3 +89,4 @@ Each observation file should be a short Markdown file with the following structu
 ```
 
 Keep observations focused. One observation per file. Split large findings into multiple files if needed.
+

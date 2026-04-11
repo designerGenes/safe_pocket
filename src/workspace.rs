@@ -49,21 +49,8 @@ pub struct Workspace {
 impl Workspace {
     pub fn spocket_dir() -> Result<PathBuf> {
         let home = dirs::home_dir().context("Failed to get home directory")?;
-
-        let canonical = home.join(".safe_pocket");
-        let legacy = home.join(".spocket");
-
-        // Use ~/.safe_pocket as the canonical location. If it doesn't exist yet
-        // but the legacy ~/.spocket does, use the legacy dir so existing pockets
-        // keep working without any migration step.
-        let dir = if !canonical.exists() && legacy.exists() {
-            legacy
-        } else {
-            canonical
-        };
-
+        let dir = home.join(".safe_pocket");
         fs::create_dir_all(&dir).context("Failed to create safe pocket storage directory")?;
-
         Ok(dir)
     }
 
@@ -187,10 +174,19 @@ impl Workspace {
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| PathBuf::from("<project path>"));
 
+        let global_obs = crate::template::global_observations_dir().unwrap_or_else(|_| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("/"))
+                .join(".config")
+                .join("safe_pocket")
+                .join("observations")
+        });
+
         let ctx = crate::template::TemplateContext {
             spocket_root: self.pocket_dir.clone(),
             project_root: primary_project_path.clone(),
             spocket_name: self.hash.clone(),
+            global_observations_path: global_obs,
         };
 
         // Apply templates (non-interactive for new pockets — no overwrite prompts)
@@ -315,11 +311,16 @@ impl Workspace {
 
     /// Read and parse a workspace file, returning the parsed struct and the extracted core paths.
     /// Filters out the pocket directory folder using path prefix matching.
+    /// Relative paths in the workspace file are resolved relative to the workspace file's
+    /// parent directory, then canonicalized.
     pub fn read_workspace_file(
         workspace_file: &Path,
         pocket_dir: &Path,
     ) -> Result<(VSCodeWorkspace, Vec<PathBuf>)> {
         let spocket_dir = Self::spocket_dir()?;
+
+        // The workspace file's parent is used as the base for resolving relative paths.
+        let workspace_parent = workspace_file.parent().unwrap_or(pocket_dir);
 
         let content =
             fs::read_to_string(workspace_file).context("Failed to read workspace file")?;
@@ -330,7 +331,21 @@ impl Workspace {
         let core_paths: Vec<PathBuf> = workspace
             .folders
             .iter()
-            .map(|f| PathBuf::from(&f.path))
+            .map(|f| {
+                let p = PathBuf::from(&f.path);
+                // Resolve relative paths to absolute using the workspace file's directory
+                // as the base, then canonicalize. If the path doesn't exist yet, just
+                // make it absolute without canonicalization.
+                if p.is_absolute() {
+                    p
+                } else {
+                    let joined = workspace_parent.join(&p);
+                    joined.canonicalize().unwrap_or_else(|_| {
+                        // Normalize without requiring the path to exist
+                        workspace_parent.join(&p)
+                    })
+                }
+            })
             .filter(|p| !p.starts_with(pocket_dir) && !p.starts_with(&spocket_dir))
             .collect();
 
@@ -501,21 +516,24 @@ impl Workspace {
 
         let (workspace, file_paths) = Self::read_workspace_file(&workspace_path, &self.pocket_dir)?;
 
-        // Compare with core paths
-        let file_set: HashSet<_> = file_paths.iter().collect();
-        let core_set: HashSet<_> = self.core_paths.iter().collect();
+        // Use manifest paths as the reference so that accepting drift (option 1) is permanent.
+        // After option 1 updates the manifest, file_paths == manifest.core_paths and we return
+        // InSync on the next invocation even though self.core_paths (CLI args) may differ.
+        let reference_paths = match Manifest::load(&self.pocket_dir)? {
+            Some(m) => m.core_paths,
+            None => self.core_paths.clone(),
+        };
 
-        if file_set == core_set {
+        let file_set: HashSet<_> = file_paths.iter().collect();
+        let ref_set: HashSet<_> = reference_paths.iter().collect();
+
+        if file_set == ref_set {
             return Ok(DriftResult::InSync);
         }
 
         // Determine added and removed folders
-        let added: Vec<_> = file_paths
-            .iter()
-            .filter(|p| !core_set.contains(p))
-            .collect();
-        let removed: Vec<_> = self
-            .core_paths
+        let added: Vec<_> = file_paths.iter().filter(|p| !ref_set.contains(p)).collect();
+        let removed: Vec<_> = reference_paths
             .iter()
             .filter(|p| !file_set.contains(p))
             .collect();
@@ -697,6 +715,9 @@ impl Workspace {
         let entries =
             fs::read_dir(&spocket_dir).context("Failed to read safe pocket storage directory")?;
 
+        // Collect all matching pockets; prefer ones where all core_paths exist on disk.
+        let mut best: Option<(Self, bool)> = None; // (workspace, all_paths_exist)
+
         for entry in entries {
             let entry = entry?;
             let pocket_dir = entry.path();
@@ -718,24 +739,37 @@ impl Workspace {
                 .to_string();
 
             // Check if any folder matches the path
-            for cp in &core_paths {
-                if cp == path {
-                    return Ok(Some(Self {
-                        hash,
-                        core_paths,
-                        sidecar_paths: vec![],
-                        pocket_dir,
-                        create_readmes: false,
-                    }));
+            let matches = core_paths.iter().any(|cp| cp == path);
+            if matches {
+                let all_exist = core_paths.iter().all(|cp| cp.exists());
+                let candidate = Self {
+                    hash,
+                    core_paths,
+                    sidecar_paths: vec![],
+                    pocket_dir,
+                    create_readmes: false,
+                };
+
+                match &best {
+                    None => {
+                        best = Some((candidate, all_exist));
+                    }
+                    Some((_, prev_all_exist)) => {
+                        // Prefer the pocket where all core paths exist on disk
+                        if all_exist && !prev_all_exist {
+                            best = Some((candidate, all_exist));
+                        }
+                    }
                 }
             }
         }
 
-        Ok(None)
+        Ok(best.map(|(ws, _)| ws))
     }
 
     /// Find the workspace that "owns" the current directory.
     /// Checks if cwd is inside a pocket dir, or inside/equal to any workspace's core_paths.
+    /// When multiple pockets match, prefers the one where all core_paths exist on disk.
     pub fn find_workspace_for_cwd(cwd: &Path) -> Result<Option<Self>> {
         let spocket_dir = Self::spocket_dir()?;
 
@@ -760,8 +794,11 @@ impl Workspace {
         }
 
         // Check 2: Is CWD inside (or equal to) any workspace's core_paths?
+        // Collect all matches; prefer ones where all core_paths exist on disk.
         let entries =
             fs::read_dir(&spocket_dir).context("Failed to read safe pocket storage directory")?;
+
+        let mut best: Option<(Self, bool)> = None; // (workspace, all_paths_exist)
 
         for entry in entries {
             let entry = entry?;
@@ -782,20 +819,32 @@ impl Workspace {
                 .unwrap_or("")
                 .to_string();
 
-            for cp in &core_paths {
-                if cwd == cp || cwd.starts_with(cp) {
-                    return Ok(Some(Self {
-                        hash,
-                        core_paths,
-                        sidecar_paths: vec![],
-                        pocket_dir,
-                        create_readmes: false,
-                    }));
+            let matches = core_paths.iter().any(|cp| cwd == cp || cwd.starts_with(cp));
+            if matches {
+                let all_exist = core_paths.iter().all(|cp| cp.exists());
+                let candidate = Self {
+                    hash,
+                    core_paths,
+                    sidecar_paths: vec![],
+                    pocket_dir,
+                    create_readmes: false,
+                };
+
+                match &best {
+                    None => {
+                        best = Some((candidate, all_exist));
+                    }
+                    Some((_, prev_all_exist)) => {
+                        // Prefer the pocket where all core paths exist on disk
+                        if all_exist && !prev_all_exist {
+                            best = Some((candidate, all_exist));
+                        }
+                    }
                 }
             }
         }
 
-        Ok(None)
+        Ok(best.map(|(ws, _)| ws))
     }
 
     /// Secondary lookup: scan all pocket manifests for one whose current `hash`

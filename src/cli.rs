@@ -187,6 +187,28 @@ pub enum Commands {
         no_open: bool,
     },
 
+    /// Inject runtime content into destination files (called by the VS Code extension on open)
+    ///
+    /// For each template marked with `#SPOCKET_MERGE_AT_RUNTIME`, injects the expanded
+    /// template content into the destination file wrapped in runtime markers.
+    #[command(name = "merge-start")]
+    MergeStart {
+        /// Path to the pocket directory containing the manifest
+        #[arg(long = "pocket", value_name = "PATH")]
+        pocket: String,
+    },
+
+    /// Strip runtime content from destination files (called by the VS Code extension on close)
+    ///
+    /// Removes any content between `#SPOCKET_RUNTIME_CONTENT_START` and
+    /// `#SPOCKET_RUNTIME_CONTENT_END` markers from destination files.
+    #[command(name = "merge-stop")]
+    MergeStop {
+        /// Path to the pocket directory containing the manifest
+        #[arg(long = "pocket", value_name = "PATH")]
+        pocket: String,
+    },
+
     /// Print a shell completion script to stdout
     ///
     /// Generates tab-completion definitions for your shell.  Pipe the output to

@@ -41,8 +41,9 @@ const path = __importStar(require("path"));
 const os = __importStar(require("os"));
 let statusBarItem;
 let syncInProgress = false;
+let activePocketDir;
 function getSpocketDir() {
-    return path.join(os.homedir(), ".spocket");
+    return path.join(os.homedir(), ".safe_pocket");
 }
 function isSpocketWorkspace(workspaceFile) {
     if (!workspaceFile) {
@@ -81,6 +82,17 @@ function runSync(pocketDir) {
                     message: `Failed to parse sync output: ${stdout}`,
                 });
             }
+        });
+    });
+}
+function runMergeCommand(action, pocketDir) {
+    return new Promise((resolve) => {
+        const binary = getBinaryPath();
+        (0, child_process_1.execFile)(binary, [action, "--pocket", pocketDir], (error) => {
+            if (error) {
+                console.error(`spocket ${action} failed: ${error.message}`);
+            }
+            resolve();
         });
     });
 }
@@ -129,25 +141,26 @@ async function handleFolderChange(pocketDir) {
 function activate(context) {
     const pocketDir = isSpocketWorkspace(vscode.workspace.workspaceFile);
     if (!pocketDir) {
-        // Not a spocket workspace — silent no-op
         return;
     }
-    // Create status bar item
+    activePocketDir = pocketDir;
     statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     statusBarItem.text = "$(check) Spocket";
     statusBarItem.tooltip = `Pocket: ${path.basename(pocketDir)}`;
     statusBarItem.show();
     context.subscriptions.push(statusBarItem);
-    // Register folder change listener
     const disposable = vscode.workspace.onDidChangeWorkspaceFolders(() => {
         handleFolderChange(pocketDir);
     });
     context.subscriptions.push(disposable);
-    // Initial sync to ensure manifest is up to date
     handleFolderChange(pocketDir);
+    runMergeCommand("merge-start", pocketDir).catch((err) => console.error("spocket merge-start failed:", err));
 }
 function deactivate() {
     statusBarItem?.dispose();
     statusBarItem = undefined;
+    if (activePocketDir) {
+        return runMergeCommand("merge-stop", activePocketDir);
+    }
 }
 //# sourceMappingURL=extension.js.map

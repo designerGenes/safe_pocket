@@ -5,6 +5,7 @@ import * as os from "os";
 
 let statusBarItem: vscode.StatusBarItem | undefined;
 let syncInProgress = false;
+let activePocketDir: string | undefined;
 
 interface SyncResult {
   status: "unchanged" | "synced" | "error";
@@ -17,7 +18,7 @@ interface SyncResult {
 }
 
 function getSpocketDir(): string {
-  return path.join(os.homedir(), ".spocket");
+  return path.join(os.homedir(), ".safe_pocket");
 }
 
 function isSpocketWorkspace(
@@ -65,6 +66,21 @@ function runSync(pocketDir: string): Promise<SyncResult> {
           message: `Failed to parse sync output: ${stdout}`,
         });
       }
+    });
+  });
+}
+
+function runMergeCommand(
+  action: "merge-start" | "merge-stop",
+  pocketDir: string
+): Promise<void> {
+  return new Promise((resolve) => {
+    const binary = getBinaryPath();
+    execFile(binary, [action, "--pocket", pocketDir], (error) => {
+      if (error) {
+        console.error(`spocket ${action} failed: ${error.message}`);
+      }
+      resolve();
     });
   });
 }
@@ -134,11 +150,11 @@ export function activate(context: vscode.ExtensionContext): void {
   const pocketDir = isSpocketWorkspace(vscode.workspace.workspaceFile);
 
   if (!pocketDir) {
-    // Not a spocket workspace — silent no-op
     return;
   }
 
-  // Create status bar item
+  activePocketDir = pocketDir;
+
   statusBarItem = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Right,
     100
@@ -148,17 +164,23 @@ export function activate(context: vscode.ExtensionContext): void {
   statusBarItem.show();
   context.subscriptions.push(statusBarItem);
 
-  // Register folder change listener
   const disposable = vscode.workspace.onDidChangeWorkspaceFolders(() => {
     handleFolderChange(pocketDir);
   });
   context.subscriptions.push(disposable);
 
-  // Initial sync to ensure manifest is up to date
   handleFolderChange(pocketDir);
+
+  runMergeCommand("merge-start", pocketDir).catch((err) =>
+    console.error("spocket merge-start failed:", err)
+  );
 }
 
-export function deactivate(): void {
+export function deactivate(): Thenable<void> | void {
   statusBarItem?.dispose();
   statusBarItem = undefined;
+
+  if (activePocketDir) {
+    return runMergeCommand("merge-stop", activePocketDir);
+  }
 }

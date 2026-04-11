@@ -11,6 +11,12 @@ use std::path::{Path, PathBuf};
 pub const DEFAULT_COPILOT_INSTRUCTIONS: &str = include_str!("defaults/copilot-instructions.md");
 pub const DEFAULT_AGENTS_MD: &str = include_str!("defaults/AGENTS.md");
 pub const DEFAULT_DIRECTORY_STRUCTURE: &str = include_str!("defaults/directory_structure.md");
+pub const DEFAULT_PROJECT_ENV: &str = include_str!("defaults/project.env.md");
+pub const DEFAULT_SAFE_POCKET_ENV: &str = include_str!("defaults/safe_pocket.env.md");
+pub const DEFAULT_PROJECT_GITIGNORE: &str = include_str!("defaults/gitignore.md");
+pub const DEFAULT_SAFE_POCKET_GITIGNORE: &str = include_str!("defaults/safe_pocket.gitignore.md");
+pub const DEFAULT_TALK_LIKE_A_CAT_PROMPT: &str =
+    include_str!("defaults/prompts/TalkLikeACat.prompt.md");
 
 // ── Template variables ───────────────────────────────────────────────────────
 
@@ -22,13 +28,20 @@ pub struct TemplateContext {
     pub project_root: PathBuf,
     /// Short name of the safe pocket (the directory basename / hash).
     pub spocket_name: String,
+    /// Absolute path to the global observations directory (`~/.config/safe_pocket/observations`).
+    pub global_observations_path: PathBuf,
 }
 
-/// Replace `{{SPOCKET_ROOT}}`, `{{PROJECT_ROOT}}`, `{{SPOCKET_NAME}}` in `text`.
+/// Replace `{{SPOCKET_ROOT}}`, `{{PROJECT_ROOT}}`, `{{SPOCKET_NAME}}`,
+/// and `{{GLOBAL_OBSERVATIONS_PATH}}` in `text`.
 pub fn expand_variables(text: &str, ctx: &TemplateContext) -> String {
     text.replace("{{SPOCKET_ROOT}}", &ctx.spocket_root.to_string_lossy())
         .replace("{{PROJECT_ROOT}}", &ctx.project_root.to_string_lossy())
         .replace("{{SPOCKET_NAME}}", &ctx.spocket_name)
+        .replace(
+            "{{GLOBAL_OBSERVATIONS_PATH}}",
+            &ctx.global_observations_path.to_string_lossy(),
+        )
 }
 
 // ── Parsed template ──────────────────────────────────────────────────────────
@@ -40,6 +53,11 @@ pub struct Template {
     pub destination: String,
     /// File content (everything after the metadata lines, with `#SPOCKET` lines stripped).
     pub content: String,
+    /// If true, merge with existing file rather than overwriting.
+    pub quiet_merge: bool,
+    /// If true, content is injected into the destination file at runtime (VS Code open/close)
+    /// wrapped in `#SPOCKET_RUNTIME_CONTENT_START` / `#SPOCKET_RUNTIME_CONTENT_END` markers.
+    pub merge_at_runtime: bool,
     /// Original source file path (for diagnostics).
     #[allow(dead_code)]
     pub source_path: PathBuf,
@@ -51,6 +69,9 @@ pub struct Template {
 /// by a colon (optional) and the destination path. All subsequent lines that
 /// start with `#SPOCKET` are treated as metadata and stripped. Everything else
 /// becomes the template content.
+///
+/// Recognised metadata directives:
+/// - `#SPOCKET_QUIET_MERGE` — merge with existing file instead of overwriting.
 pub fn parse_template(path: &Path) -> Result<Template> {
     let raw = fs::read_to_string(path)
         .with_context(|| format!("Failed to read template file: {}", path.display()))?;
@@ -71,8 +92,22 @@ pub fn parse_template(path: &Path) -> Result<Template> {
         )
     })?;
 
-    // Collect remaining lines, stripping any that start with #SPOCKET
-    let content_lines: Vec<&str> = lines.filter(|line| !line.starts_with("#SPOCKET")).collect();
+    // Collect remaining lines, detecting directives and stripping any that start with #SPOCKET
+    let mut quiet_merge = false;
+    let mut merge_at_runtime = false;
+    let content_lines: Vec<&str> = lines
+        .filter(|line| {
+            if line.trim() == "#SPOCKET_QUIET_MERGE" {
+                quiet_merge = true;
+                false
+            } else if line.trim() == "#SPOCKET_MERGE_AT_RUNTIME" {
+                merge_at_runtime = true;
+                false
+            } else {
+                !line.starts_with("#SPOCKET")
+            }
+        })
+        .collect();
     let mut content = content_lines.join("\n");
 
     // Preserve trailing newline if original file had one
@@ -90,6 +125,8 @@ pub fn parse_template(path: &Path) -> Result<Template> {
     Ok(Template {
         destination,
         content,
+        quiet_merge,
+        merge_at_runtime,
         source_path: path.to_path_buf(),
     })
 }
@@ -205,12 +242,30 @@ pub fn templates_dir() -> Result<PathBuf> {
     Ok(safe_pocket_config_dir()?.join("templates"))
 }
 
+/// Returns the path to the global observations directory
+/// (`$HOME/.config/safe_pocket/observations`), creating it if necessary.
+pub fn global_observations_dir() -> Result<PathBuf> {
+    let dir = safe_pocket_config_dir()?.join("observations");
+    fs::create_dir_all(&dir).context("Failed to create global observations directory")?;
+    Ok(dir)
+}
+
 /// Ensure the default assets exist in the user's config directory.
 /// Only writes files that don't already exist (respects user customizations).
 pub fn ensure_default_assets() -> Result<()> {
     let config_dir = safe_pocket_config_dir()?;
     let tmpl_dir = config_dir.join("templates");
     fs::create_dir_all(&tmpl_dir).context("Failed to create templates directory")?;
+
+    let prompts_dir = tmpl_dir.join("prompts");
+    fs::create_dir_all(&prompts_dir).context("Failed to create templates/prompts directory")?;
+
+    // Ensure global observations directory exists
+    let observations_dir = config_dir.join("observations");
+    if !observations_dir.exists() {
+        fs::create_dir_all(&observations_dir)
+            .context("Failed to create global observations directory")?;
+    }
 
     // Default template files
     let defaults: &[(&str, &str)] = &[
@@ -219,6 +274,17 @@ pub fn ensure_default_assets() -> Result<()> {
             DEFAULT_COPILOT_INSTRUCTIONS,
         ),
         ("templates/AGENTS.md", DEFAULT_AGENTS_MD),
+        ("templates/project.env.md", DEFAULT_PROJECT_ENV),
+        ("templates/safe_pocket.env.md", DEFAULT_SAFE_POCKET_ENV),
+        ("templates/gitignore.md", DEFAULT_PROJECT_GITIGNORE),
+        (
+            "templates/safe_pocket.gitignore.md",
+            DEFAULT_SAFE_POCKET_GITIGNORE,
+        ),
+        (
+            "templates/prompts/TalkLikeACat.prompt.md",
+            DEFAULT_TALK_LIKE_A_CAT_PROMPT,
+        ),
     ];
 
     for (rel_path, content) in defaults {
@@ -253,7 +319,7 @@ pub fn ensure_default_assets() -> Result<()> {
     Ok(())
 }
 
-/// Load all template files from the templates directory.
+/// Load all template files from the templates directory, walking subdirectories recursively.
 pub fn load_templates() -> Result<Vec<Template>> {
     let tmpl_dir = templates_dir()?;
 
@@ -262,26 +328,34 @@ pub fn load_templates() -> Result<Vec<Template>> {
     }
 
     let mut templates = Vec::new();
+    let mut dirs_to_visit = vec![tmpl_dir.clone()];
 
-    for entry in fs::read_dir(&tmpl_dir)
-        .with_context(|| format!("Failed to read templates directory: {}", tmpl_dir.display()))?
-    {
-        let entry = entry?;
-        let path = entry.path();
+    while let Some(dir) = dirs_to_visit.pop() {
+        for entry in fs::read_dir(&dir)
+            .with_context(|| format!("Failed to read templates directory: {}", dir.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
 
-        if !path.is_file() {
-            continue;
-        }
+            if path.is_dir() {
+                dirs_to_visit.push(path);
+                continue;
+            }
 
-        match parse_template(&path) {
-            Ok(tmpl) => templates.push(tmpl),
-            Err(e) => {
-                eprintln!(
-                    "{} skipping {}: {}",
-                    "Warning:".bright_yellow(),
-                    path.display(),
-                    e
-                );
+            if !path.is_file() {
+                continue;
+            }
+
+            match parse_template(&path) {
+                Ok(tmpl) => templates.push(tmpl),
+                Err(e) => {
+                    eprintln!(
+                        "{} skipping {}: {}",
+                        "Warning:".bright_yellow(),
+                        path.display(),
+                        e
+                    );
+                }
             }
         }
     }
@@ -343,7 +417,211 @@ pub fn load_directory_structure(project_dir: Option<&Path>) -> Result<Vec<PathBu
     }
 }
 
+// ── Runtime merge ────────────────────────────────────────────────────────────
+
+pub const RUNTIME_START_MARKER: &str = "#SPOCKET_RUNTIME_CONTENT_START";
+pub const RUNTIME_END_MARKER: &str = "#SPOCKET_RUNTIME_CONTENT_END";
+
+fn strip_markers(content: &str) -> String {
+    let mut result = String::new();
+    let mut in_block = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed == RUNTIME_START_MARKER {
+            in_block = true;
+            continue;
+        }
+        if trimmed == RUNTIME_END_MARKER {
+            in_block = false;
+            continue;
+        }
+        if !in_block {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+
+    let trimmed_end = result.trim_end().to_string();
+    if trimmed_end.is_empty() {
+        trimmed_end
+    } else {
+        format!("{}\n", trimmed_end)
+    }
+}
+
+pub fn inject_runtime_content(dest_path: &Path, runtime_content: &str) -> Result<bool> {
+    let existing = if dest_path.exists() {
+        fs::read_to_string(dest_path)
+            .with_context(|| format!("Failed to read: {}", dest_path.display()))?
+    } else {
+        String::new()
+    };
+
+    let base = strip_markers(&existing);
+
+    let mut injected = base.trim_end().to_string();
+    if !injected.is_empty() {
+        injected.push('\n');
+    }
+    injected.push_str(RUNTIME_START_MARKER);
+    injected.push('\n');
+    injected.push_str(runtime_content.trim_end());
+    injected.push('\n');
+    injected.push_str(RUNTIME_END_MARKER);
+    injected.push('\n');
+
+    if injected == existing {
+        return Ok(false);
+    }
+
+    if let Some(parent) = dest_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create parent directory: {}", parent.display()))?;
+    }
+
+    fs::write(dest_path, &injected)
+        .with_context(|| format!("Failed to write: {}", dest_path.display()))?;
+
+    Ok(true)
+}
+
+pub fn strip_runtime_content(dest_path: &Path) -> Result<bool> {
+    if !dest_path.exists() {
+        return Ok(false);
+    }
+
+    let existing = fs::read_to_string(dest_path)
+        .with_context(|| format!("Failed to read: {}", dest_path.display()))?;
+
+    if !existing.contains(RUNTIME_START_MARKER) {
+        return Ok(false);
+    }
+
+    let stripped = strip_markers(&existing);
+
+    if stripped == existing {
+        return Ok(false);
+    }
+
+    fs::write(dest_path, &stripped)
+        .with_context(|| format!("Failed to write: {}", dest_path.display()))?;
+
+    Ok(true)
+}
+
+pub fn apply_merge_at_runtime(pocket_dir: &Path, ctx: &TemplateContext) -> Result<usize> {
+    let templates = load_templates()?;
+    let mut count = 0;
+
+    for tmpl in templates.iter().filter(|t| t.merge_at_runtime) {
+        let dest_rel = expand_variables(&tmpl.destination, ctx);
+        let content = expand_variables(&tmpl.content, ctx);
+        let dest_path = resolve_template_destination(&dest_rel, pocket_dir, ctx);
+
+        match inject_runtime_content(&dest_path, &content) {
+            Ok(true) => {
+                count += 1;
+                println!(
+                    "  {} {}",
+                    "Runtime merged:".bright_green(),
+                    dest_path.display().to_string().bright_blue()
+                );
+            }
+            Ok(false) => {}
+            Err(e) => {
+                eprintln!(
+                    "{} runtime merge failed for {}: {}",
+                    "Warning:".bright_yellow(),
+                    dest_path.display(),
+                    e
+                );
+            }
+        }
+    }
+
+    Ok(count)
+}
+
+pub fn strip_merge_at_runtime(pocket_dir: &Path, ctx: &TemplateContext) -> Result<usize> {
+    let templates = load_templates()?;
+    let mut count = 0;
+
+    for tmpl in templates.iter().filter(|t| t.merge_at_runtime) {
+        let dest_rel = expand_variables(&tmpl.destination, ctx);
+        let dest_path = resolve_template_destination(&dest_rel, pocket_dir, ctx);
+
+        match strip_runtime_content(&dest_path) {
+            Ok(true) => {
+                count += 1;
+                println!(
+                    "  {} {}",
+                    "Runtime stripped:".bright_green(),
+                    dest_path.display().to_string().bright_blue()
+                );
+            }
+            Ok(false) => {}
+            Err(e) => {
+                eprintln!(
+                    "{} runtime strip failed for {}: {}",
+                    "Warning:".bright_yellow(),
+                    dest_path.display(),
+                    e
+                );
+            }
+        }
+    }
+
+    Ok(count)
+}
+
 // ── Apply templates to a pocket ──────────────────────────────────────────────
+
+/// Merge template content into existing file content.
+///
+/// For each line in `new_content` of the form `KEY=VALUE`, if `KEY` is not
+/// already present in `existing`, append the line. Lines that are blank or
+/// don't match `KEY=VALUE` are appended if not already present verbatim.
+///
+/// Returns the merged content.
+pub fn merge_content(existing: &str, new_content: &str) -> String {
+    let mut result = existing.to_string();
+
+    // Ensure the existing content ends with a newline before appending
+    if !result.is_empty() && !result.ends_with('\n') {
+        result.push('\n');
+    }
+
+    for line in new_content.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() {
+            // Skip blank lines during merge
+            continue;
+        }
+
+        // For KEY=VALUE lines, check if the key already exists
+        if let Some(eq_pos) = trimmed.find('=') {
+            let key = trimmed[..eq_pos].trim();
+            // Check if any existing line starts with KEY= (case-sensitive)
+            let key_prefix = format!("{}=", key);
+            let already_exists = existing.lines().any(|l| l.trim().starts_with(&key_prefix));
+            if already_exists {
+                continue;
+            }
+        } else {
+            // Non-KEY=VALUE line: skip if already present verbatim
+            if existing.lines().any(|l| l.trim() == trimmed) {
+                continue;
+            }
+        }
+
+        result.push_str(line);
+        result.push('\n');
+    }
+
+    result
+}
 
 /// Apply all loaded templates to a pocket directory.
 ///
@@ -374,6 +652,10 @@ pub fn apply_templates(
     let mut files_written = 0;
 
     for tmpl in &templates {
+        if tmpl.merge_at_runtime {
+            continue;
+        }
+
         // Expand variables in the destination path
         let dest_rel = expand_variables(&tmpl.destination, ctx);
         // Expand variables in the content
@@ -391,20 +673,45 @@ pub fn apply_templates(
         }
 
         // Check for existing file
-        if dest_path.exists() && interactive {
+        if dest_path.exists() {
             let existing = fs::read_to_string(&dest_path).unwrap_or_default();
+
+            if tmpl.quiet_merge {
+                // Quiet merge: add new keys/lines to existing file without overwriting
+                let merged = merge_content(&existing, &content);
+                if merged == existing {
+                    // Nothing new to add
+                    continue;
+                }
+                fs::write(&dest_path, &merged).with_context(|| {
+                    format!("Failed to merge template into: {}", dest_path.display())
+                })?;
+                files_written += 1;
+                println!(
+                    "  {} {}",
+                    "Merged:".bright_green(),
+                    dest_path.display().to_string().bright_blue()
+                );
+                continue;
+            }
+
             if existing == content {
                 // No changes needed
                 continue;
             }
 
-            // Show diff and prompt
-            if !prompt_overwrite(&dest_path, &existing, &content)? {
-                println!(
-                    "  {} {}",
-                    "Skipped:".dimmed(),
-                    dest_path.display().to_string().bright_blue()
-                );
+            if interactive {
+                // Show diff and prompt
+                if !prompt_overwrite(&dest_path, &existing, &content)? {
+                    println!(
+                        "  {} {}",
+                        "Skipped:".dimmed(),
+                        dest_path.display().to_string().bright_blue()
+                    );
+                    continue;
+                }
+            } else {
+                // Non-interactive: skip existing files with different content
                 continue;
             }
         }
@@ -558,10 +865,19 @@ pub fn upgrade_pocket(pocket_dir: &Path) -> Result<()> {
         .cloned()
         .unwrap_or_else(|| PathBuf::from("<unknown>"));
 
+    let global_obs = global_observations_dir().unwrap_or_else(|_| {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("/"))
+            .join(".config")
+            .join("safe_pocket")
+            .join("observations")
+    });
+
     let ctx = TemplateContext {
         spocket_root: pocket_dir.to_path_buf(),
         project_root: project_root.clone(),
         spocket_name,
+        global_observations_path: global_obs,
     };
 
     println!(
@@ -643,13 +959,22 @@ mod tests {
 
     // ── expand_variables ────────────────────────────────────────────────
 
+    fn make_ctx(spocket_root: &str, project_root: &str, name: &str) -> TemplateContext {
+        TemplateContext {
+            spocket_root: PathBuf::from(spocket_root),
+            project_root: PathBuf::from(project_root),
+            spocket_name: name.to_string(),
+            global_observations_path: PathBuf::from("/global/observations"),
+        }
+    }
+
     #[test]
     fn test_expand_variables() {
-        let ctx = TemplateContext {
-            spocket_root: PathBuf::from("/home/user/.safe_pocket/abc123"),
-            project_root: PathBuf::from("/home/user/project"),
-            spocket_name: "abc123".to_string(),
-        };
+        let ctx = make_ctx(
+            "/home/user/.safe_pocket/abc123",
+            "/home/user/project",
+            "abc123",
+        );
 
         let input = "Root: {{SPOCKET_ROOT}}\nProject: {{PROJECT_ROOT}}\nName: {{SPOCKET_NAME}}";
         let result = expand_variables(input, &ctx);
@@ -661,12 +986,16 @@ mod tests {
     }
 
     #[test]
+    fn test_expand_variables_global_observations() {
+        let ctx = make_ctx("/sp", "/pr", "name");
+
+        let input = "Obs: {{GLOBAL_OBSERVATIONS_PATH}}";
+        assert_eq!(expand_variables(input, &ctx), "Obs: /global/observations");
+    }
+
+    #[test]
     fn test_expand_variables_no_variables() {
-        let ctx = TemplateContext {
-            spocket_root: PathBuf::from("/x"),
-            project_root: PathBuf::from("/y"),
-            spocket_name: "z".to_string(),
-        };
+        let ctx = make_ctx("/x", "/y", "z");
 
         let input = "No variables here";
         assert_eq!(expand_variables(input, &ctx), "No variables here");
@@ -674,11 +1003,7 @@ mod tests {
 
     #[test]
     fn test_expand_variables_multiple_occurrences() {
-        let ctx = TemplateContext {
-            spocket_root: PathBuf::from("/sp"),
-            project_root: PathBuf::from("/pr"),
-            spocket_name: "name".to_string(),
-        };
+        let ctx = make_ctx("/sp", "/pr", "name");
 
         let input = "{{SPOCKET_ROOT}} and {{SPOCKET_ROOT}} again";
         assert_eq!(expand_variables(input, &ctx), "/sp and /sp again");
@@ -824,11 +1149,7 @@ mod tests {
 
     #[test]
     fn test_resolve_destination_relative() {
-        let ctx = TemplateContext {
-            spocket_root: PathBuf::from("/pocket"),
-            project_root: PathBuf::from("/project"),
-            spocket_name: "hash".to_string(),
-        };
+        let ctx = make_ctx("/pocket", "/project", "hash");
         let pocket = PathBuf::from("/pocket");
 
         let result = resolve_template_destination(".github/test.md", &pocket, &ctx);
@@ -837,11 +1158,7 @@ mod tests {
 
     #[test]
     fn test_resolve_destination_absolute() {
-        let ctx = TemplateContext {
-            spocket_root: PathBuf::from("/pocket"),
-            project_root: PathBuf::from("/project"),
-            spocket_name: "hash".to_string(),
-        };
+        let ctx = make_ctx("/pocket", "/project", "hash");
         let pocket = PathBuf::from("/pocket");
 
         let result = resolve_template_destination("/pocket/AGENTS.md", &pocket, &ctx);
@@ -873,11 +1190,11 @@ mod tests {
         // Write directory structure
         fs::write(config_dir.join("directory_structure.md"), "subdir\nother\n").unwrap();
 
-        let ctx = TemplateContext {
-            spocket_root: pocket_dir.clone(),
-            project_root: base.join("project"),
-            spocket_name: "testhash".to_string(),
-        };
+        let ctx = make_ctx(
+            &pocket_dir.to_string_lossy(),
+            &base.join("project").to_string_lossy(),
+            "testhash",
+        );
 
         // We can't easily test apply_templates directly because it reads from
         // the real config dir. This test verifies the building blocks work.
@@ -940,5 +1257,87 @@ mod tests {
         let (depth, name) = parse_directory_line("- - - deep");
         assert_eq!(depth, 3);
         assert_eq!(name, "deep");
+    }
+
+    // ── #SPOCKET_QUIET_MERGE ────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_template_quiet_merge_flag() {
+        let dir = std::env::temp_dir().join("spocket_test_quiet_merge_flag");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let file = dir.join("env.md");
+        fs::write(
+            &file,
+            "#SPOCKET_TEMPLATE_DESTINATION: .env\n#SPOCKET_QUIET_MERGE\n\nMY_KEY=value\n",
+        )
+        .unwrap();
+
+        let tmpl = parse_template(&file).unwrap();
+        assert!(tmpl.quiet_merge, "quiet_merge should be true");
+        assert_eq!(tmpl.content, "MY_KEY=value\n");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_parse_template_no_quiet_merge_flag() {
+        let dir = std::env::temp_dir().join("spocket_test_no_quiet_merge");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let file = dir.join("regular.md");
+        fs::write(
+            &file,
+            "#SPOCKET_TEMPLATE_DESTINATION: regular.txt\nSome content\n",
+        )
+        .unwrap();
+
+        let tmpl = parse_template(&file).unwrap();
+        assert!(!tmpl.quiet_merge, "quiet_merge should be false");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── merge_content ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_merge_content_adds_new_key() {
+        let existing = "EXISTING_KEY=old_value\n";
+        let new_content = "NEW_KEY=new_value\n";
+        let result = merge_content(existing, new_content);
+        assert!(result.contains("EXISTING_KEY=old_value"));
+        assert!(result.contains("NEW_KEY=new_value"));
+    }
+
+    #[test]
+    fn test_merge_content_skips_existing_key() {
+        let existing = "MY_KEY=original\n";
+        let new_content = "MY_KEY=replacement\n";
+        let result = merge_content(existing, new_content);
+        assert!(result.contains("MY_KEY=original"));
+        // The new value should NOT replace the existing one
+        assert!(!result.contains("MY_KEY=replacement"));
+    }
+
+    #[test]
+    fn test_merge_content_into_empty() {
+        let existing = "";
+        let new_content = "KEY=value\n";
+        let result = merge_content(existing, new_content);
+        assert!(result.contains("KEY=value"));
+    }
+
+    #[test]
+    fn test_merge_content_skips_blank_lines() {
+        let existing = "A=1\n";
+        let new_content = "\nB=2\n\nC=3\n";
+        let result = merge_content(existing, new_content);
+        assert!(result.contains("A=1"));
+        assert!(result.contains("B=2"));
+        assert!(result.contains("C=3"));
+        // Should not have double blank lines added
+        assert!(!result.contains("\n\n\n"));
     }
 }

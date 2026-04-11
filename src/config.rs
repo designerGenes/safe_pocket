@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use colored::Colorize;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -10,33 +11,47 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn config_dir() -> Result<PathBuf> {
-        let config_dir = dirs::config_dir()
-            .context("Failed to get config directory")?
-            .join("spocket");
-
-        fs::create_dir_all(&config_dir).context("Failed to create config directory")?;
-
-        Ok(config_dir)
+    pub fn registry_dir() -> Result<PathBuf> {
+        let home = dirs::home_dir().context("Failed to get home directory")?;
+        let dir = home.join(".safe_pocket").join("registry");
+        fs::create_dir_all(&dir).context("Failed to create registry directory")?;
+        Ok(dir)
     }
 
     pub fn config_path() -> Result<PathBuf> {
-        Ok(Self::config_dir()?.join("config.json"))
+        Ok(Self::registry_dir()?.join("aliases.json"))
+    }
+
+    fn legacy_config_path() -> Option<PathBuf> {
+        dirs::config_dir().map(|d| d.join("spocket").join("config.json"))
     }
 
     pub fn load() -> Result<Self> {
-        let path = Self::config_path()?;
+        let new_path = Self::config_path()?;
 
-        if !path.exists() {
-            return Ok(Config::default());
+        if new_path.exists() {
+            let content = fs::read_to_string(&new_path).context("Failed to read config file")?;
+            return Ok(serde_json::from_str(&content).context("Failed to parse config file")?);
         }
 
-        let content = fs::read_to_string(&path).context("Failed to read config file")?;
+        if let Some(old_path) = Self::legacy_config_path() {
+            if old_path.exists() {
+                let content =
+                    fs::read_to_string(&old_path).context("Failed to read legacy config file")?;
+                let config: Config =
+                    serde_json::from_str(&content).context("Failed to parse legacy config file")?;
+                config.save()?;
+                let _ = fs::remove_file(&old_path);
+                println!(
+                    "{} {}",
+                    "Migrated alias registry to:".bright_green(),
+                    new_path.display().to_string().dimmed()
+                );
+                return Ok(config);
+            }
+        }
 
-        let config: Config =
-            serde_json::from_str(&content).context("Failed to parse config file")?;
-
-        Ok(config)
+        Ok(Config::default())
     }
 
     pub fn save(&self) -> Result<()> {
