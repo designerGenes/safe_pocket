@@ -30,8 +30,7 @@ QUICK START
 
 POCKET DIRECTORY
 
-  New pockets are created in ~/.safe_pocket/<hash>/.
-  Existing pockets in the legacy ~/.spocket/<hash>/ are used transparently.
+  Pockets are stored in ~/.safe_pocket/<hash>/.
 
 TEMPLATES
 
@@ -110,6 +109,19 @@ pub struct Cli {
     ///   spocket -u ~/.safe_pocket/abc123
     #[arg(short = 'u', long = "upgrade", value_name = "PATH")]
     pub upgrade: Option<String>,
+
+    /// Enable verbose output
+    ///
+    /// Shows informational messages that are hidden by default, such as runtime
+    /// merge notifications, template installation notices, and other
+    /// non-error/non-warning details.
+    ///
+    ///   spocket -i . --verbose
+    #[arg(long = "verbose")]
+    pub verbose: bool,
+
+    #[arg(short = 'v', hide = true)]
+    pub short_version: bool,
 }
 
 // ── Subcommands ───────────────────────────────────────────────────────────────

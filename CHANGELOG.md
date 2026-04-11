@@ -2,6 +2,15 @@
 
 All notable changes to Safe Pocket (spocket) will be documented in this file.
 
+## [0.3.0] - 2026-04-11
+
+### Added
+- **`-v`/`--version` flag** to display the application version (`spocket -v`)
+- **`--verbose` flag** to enable detailed informational output
+
+### Changed
+- **Quieter default output**: Non-error, non-warning messages (e.g. "Runtime merged: ...", "Installed default template: ...") are now hidden unless `--verbose` is passed. This keeps the normal launch experience clean and uncluttered.
+
 ## [0.2.1] - 2026-02-14
 
 ### Changed

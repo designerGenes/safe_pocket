@@ -158,11 +158,28 @@ spocket -i myproject --no-readme
 
 **Note:** READMEs are never created when cloning from an existing workspace (they're preserved from the source).
 
+### Version
+
+Check which version of spocket you have:
+
+```bash
+spocket -v
+spocket --version
+```
+
+### Verbose Output
+
+By default, informational messages (such as runtime merge notifications) are suppressed for a clean experience. Enable them when you want to see what's happening under the hood:
+
+```bash
+spocket -i myproject --verbose
+```
+
 ## How It Works
 
 1. **Hashing**: When you specify directories with `-i`, spocket sorts and hashes their full paths to create a unique 12-character identifier.
 
-2. **Safe Pocket Creation**: A directory is created at `~/.spocket/<hash>/` containing:
+2. **Safe Pocket Creation**: A directory is created at `~/.safe_pocket/<hash>/` containing:
    - `.github/prompts/` - Custom prompt templates
    - `.github/copilot-instructions.md` - Copilot instructions
    - `FEATURES/00.md` - Feature documentation
@@ -179,7 +196,7 @@ spocket -i myproject --no-readme
 ## Directory Structure
 
 ```
-~/.spocket/
+~/.safe_pocket/
 └── abc123def456/              # Hash of included directories
     ├── .git/                  # Git repository
     ├── .github/
@@ -190,13 +207,14 @@ spocket -i myproject --no-readme
     ├── observations/
     └── abc123def456.code-workspace
 
-~/.config/spocket/
-└── config.json                # Alias registry
+~/.safe_pocket/
+└── registry/
+    └── aliases.json           # Alias registry
 ```
 
 ## Configuration
 
-Configuration is stored at `~/.config/spocket/config.json`:
+Configuration is stored at `~/.safe_pocket/registry/aliases.json`:
 
 ```json
 {
@@ -238,7 +256,19 @@ spocket -i ~/monorepo/feature-a
 spocket -i ~/monorepo/feature-b --clone-from ~/monorepo/feature-a
 ```
 
-## Recent Features (v0.2.0)
+## Recent Features (v0.3.0)
+
+- ✅ **`-v`/`--version`**: Check the installed version with `spocket -v` or `spocket --version`
+- ✅ **`--verbose` flag**: Opt-in to detailed output (runtime merge notices, template installs, etc.)
+- ✅ **Cleaner default output**: Non-error, non-warning messages are now hidden by default
+
+### Previous: v0.2.1
+
+- ✅ **No emojis**: Cleaner, more professional CLI output
+- ✅ **README files** in safe pocket directories explaining their purpose
+- ✅ **`--no-readme` flag** to skip README generation
+
+### Previous: v0.2.0
 
 - ✅ **Smart Cloning**: Automatic detection of similar workspaces with interactive selection
 - ✅ **Similarity Calculation**: Jaccard-based similarity scoring for workspace matching

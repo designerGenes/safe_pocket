@@ -12,11 +12,18 @@ use colored::Colorize;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use cli::{Cli, Commands};
 use config::Config;
 use manifest::Manifest;
 use workspace::{DriftResult, Workspace};
+
+static VERBOSE: OnceLock<bool> = OnceLock::new();
+
+pub fn verbose() -> bool {
+    *VERBOSE.get().unwrap_or(&false)
+}
 
 fn main() {
     if let Err(e) = run() {
@@ -27,6 +34,13 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+
+    let _ = VERBOSE.set(cli.verbose);
+
+    if cli.short_version {
+        println!("{}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
 
     // Ensure default template assets exist in the user's config directory.
     // This is a no-op after the first run (only writes files that don't exist).
@@ -300,6 +314,8 @@ fn handle_workspace(cli: Cli) -> Result<()> {
     } else {
         println!("{}", "Using existing workspace".dimmed());
 
+        workspace.migrate_storage_references()?;
+
         // Run beads setup regardless of whether the pocket is new — idempotent
         if use_beads {
             workspace.setup_beads()?;
@@ -355,6 +371,20 @@ fn handle_sync(pocket: String) -> Result<()> {
             return Ok(());
         }
     };
+
+    let workspace_hash = pocket_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("")
+        .to_string();
+    let migration_workspace = Workspace {
+        hash: workspace_hash,
+        core_paths: vec![],
+        sidecar_paths: vec![],
+        pocket_dir: pocket_dir.clone(),
+        create_readmes: false,
+    };
+    migration_workspace.migrate_storage_references()?;
 
     // Read current paths from workspace file
     let (_, file_paths) = Workspace::read_workspace_file(&workspace_file, &pocket_dir)?;
@@ -491,6 +521,7 @@ fn handle_augment(add: Vec<String>, remove: Vec<String>, no_open: bool) -> Resul
     // Read existing workspace file for settings preservation
     let workspace_file = workspace.workspace_file_path();
     let existing_ws = if workspace_file.exists() {
+        workspace.migrate_storage_references()?;
         let (ws, _) = Workspace::read_workspace_file(&workspace_file, &workspace.pocket_dir)?;
         Some(ws)
     } else {

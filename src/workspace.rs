@@ -54,6 +54,11 @@ impl Workspace {
         Ok(dir)
     }
 
+    fn legacy_spocket_dir() -> Result<PathBuf> {
+        let home = dirs::home_dir().context("Failed to get home directory")?;
+        Ok(home.join(".spocket"))
+    }
+
     /// Find the .code-workspace file in a pocket directory.
     /// Looks for `<dirname>.code-workspace` first, falls back to any `.code-workspace` file.
     pub fn find_workspace_file(pocket_dir: &Path) -> Option<PathBuf> {
@@ -318,6 +323,7 @@ impl Workspace {
         pocket_dir: &Path,
     ) -> Result<(VSCodeWorkspace, Vec<PathBuf>)> {
         let spocket_dir = Self::spocket_dir()?;
+        let legacy_spocket_dir = Self::legacy_spocket_dir()?;
 
         // The workspace file's parent is used as the base for resolving relative paths.
         let workspace_parent = workspace_file.parent().unwrap_or(pocket_dir);
@@ -346,10 +352,53 @@ impl Workspace {
                     })
                 }
             })
-            .filter(|p| !p.starts_with(pocket_dir) && !p.starts_with(&spocket_dir))
+            .filter(|p| {
+                !p.starts_with(pocket_dir)
+                    && !p.starts_with(&spocket_dir)
+                    && !p.starts_with(&legacy_spocket_dir)
+            })
             .collect();
 
         Ok((workspace, core_paths))
+    }
+
+    fn workspace_storage_paths_need_migration(&self, workspace: &VSCodeWorkspace) -> Result<bool> {
+        let spocket_dir = Self::spocket_dir()?;
+        let legacy_spocket_dir = Self::legacy_spocket_dir()?;
+
+        let mut has_current_pocket_entry = false;
+
+        for folder in &workspace.folders {
+            let path = PathBuf::from(&folder.path);
+            if path == self.pocket_dir {
+                has_current_pocket_entry = true;
+                continue;
+            }
+
+            if path.starts_with(&spocket_dir) || path.starts_with(&legacy_spocket_dir) {
+                return Ok(true);
+            }
+        }
+
+        Ok(!has_current_pocket_entry)
+    }
+
+    pub fn migrate_storage_references(&self) -> Result<()> {
+        let workspace_path = self.workspace_file_path();
+        if !workspace_path.exists() {
+            return Ok(());
+        }
+
+        let (workspace, _) = Self::read_workspace_file(&workspace_path, &self.pocket_dir)?;
+        if self.workspace_storage_paths_need_migration(&workspace)? {
+            self.write_workspace_file_preserving(Some(&workspace))?;
+            println!(
+                "{}",
+                "Migrated workspace storage paths to ~/.safe_pocket.".dimmed()
+            );
+        }
+
+        Ok(())
     }
 
     /// Build a workspace file from core_paths, optionally preserving settings from an existing workspace.

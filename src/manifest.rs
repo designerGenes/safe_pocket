@@ -30,6 +30,30 @@ fn default_version() -> u32 {
 }
 
 impl Manifest {
+    fn safe_pocket_storage_dir() -> Result<PathBuf> {
+        let home = dirs::home_dir().context("Failed to get home directory")?;
+        Ok(home.join(".safe_pocket"))
+    }
+
+    fn legacy_spocket_storage_dir() -> Result<PathBuf> {
+        let home = dirs::home_dir().context("Failed to get home directory")?;
+        Ok(home.join(".spocket"))
+    }
+
+    fn sanitize_core_paths(core_paths: Vec<PathBuf>, pocket_dir: &Path) -> Result<Vec<PathBuf>> {
+        let safe_pocket_dir = Self::safe_pocket_storage_dir()?;
+        let legacy_spocket_dir = Self::legacy_spocket_storage_dir()?;
+
+        Ok(core_paths
+            .into_iter()
+            .filter(|path| {
+                !path.starts_with(pocket_dir)
+                    && !path.starts_with(&safe_pocket_dir)
+                    && !path.starts_with(&legacy_spocket_dir)
+            })
+            .collect())
+    }
+
     /// Returns the birth hash (original directory name).
     /// Falls back to `hash` if `birth_hash` is None (directory was never renamed).
     pub fn birth_hash(&self) -> &str {
@@ -74,8 +98,14 @@ impl Manifest {
 
         let content = fs::read_to_string(&manifest_path).context("Failed to read manifest file")?;
 
-        let manifest: Manifest =
+        let mut manifest: Manifest =
             serde_json::from_str(&content).context("Failed to parse manifest file")?;
+
+        let sanitized_paths = Self::sanitize_core_paths(manifest.core_paths.clone(), pocket_dir)?;
+        if sanitized_paths != manifest.core_paths {
+            manifest.core_paths = sanitized_paths;
+            manifest.save(pocket_dir)?;
+        }
 
         Ok(Some(manifest))
     }
@@ -134,12 +164,13 @@ impl Manifest {
                 .context("Failed to parse workspace file for backfill")?;
 
             if let Some(folders) = ws.get("folders").and_then(|f| f.as_array()) {
-                folders
+                let raw_paths: Vec<PathBuf> = folders
                     .iter()
                     .filter_map(|f| f.get("path").and_then(|p| p.as_str()))
                     .map(PathBuf::from)
-                    .filter(|p| !p.starts_with(pocket_dir))
-                    .collect()
+                    .collect();
+
+                Self::sanitize_core_paths(raw_paths, pocket_dir)?
             } else {
                 Vec::new()
             }

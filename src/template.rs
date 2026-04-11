@@ -292,11 +292,13 @@ pub fn ensure_default_assets() -> Result<()> {
         if !target.exists() {
             fs::write(&target, content)
                 .with_context(|| format!("Failed to write default asset: {}", target.display()))?;
-            println!(
-                "{} {}",
-                "Installed default template:".bright_green(),
-                target.display().to_string().dimmed()
-            );
+            if crate::verbose() {
+                println!(
+                    "{} {}",
+                    "Installed default template:".bright_green(),
+                    target.display().to_string().dimmed()
+                );
+            }
         }
     }
 
@@ -309,11 +311,13 @@ pub fn ensure_default_assets() -> Result<()> {
                 dir_struct_path.display()
             )
         })?;
-        println!(
-            "{} {}",
-            "Installed default directory structure:".bright_green(),
-            dir_struct_path.display().to_string().dimmed()
-        );
+        if crate::verbose() {
+            println!(
+                "{} {}",
+                "Installed default directory structure:".bright_green(),
+                dir_struct_path.display().to_string().dimmed()
+            );
+        }
     }
 
     Ok(())
@@ -522,11 +526,13 @@ pub fn apply_merge_at_runtime(pocket_dir: &Path, ctx: &TemplateContext) -> Resul
         match inject_runtime_content(&dest_path, &content) {
             Ok(true) => {
                 count += 1;
-                println!(
-                    "  {} {}",
-                    "Runtime merged:".bright_green(),
-                    dest_path.display().to_string().bright_blue()
-                );
+                if crate::verbose() {
+                    println!(
+                        "  {} {}",
+                        "Runtime merged:".bright_green(),
+                        dest_path.display().to_string().bright_blue()
+                    );
+                }
             }
             Ok(false) => {}
             Err(e) => {
@@ -554,11 +560,13 @@ pub fn strip_merge_at_runtime(pocket_dir: &Path, ctx: &TemplateContext) -> Resul
         match strip_runtime_content(&dest_path) {
             Ok(true) => {
                 count += 1;
-                println!(
-                    "  {} {}",
-                    "Runtime stripped:".bright_green(),
-                    dest_path.display().to_string().bright_blue()
-                );
+                if crate::verbose() {
+                    println!(
+                        "  {} {}",
+                        "Runtime stripped:".bright_green(),
+                        dest_path.display().to_string().bright_blue()
+                    );
+                }
             }
             Ok(false) => {}
             Err(e) => {
